@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { DashboardLayout } from '@/components/dashboard/layout';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -15,64 +16,74 @@ export default function DashboardPage() {
               Welcome back! Here's an overview of your data management system.
             </p>
           </div>
-          <Button>
-            <Plus className="h-4 w-4 mr-2" />
-            Create New
+          <Button asChild>
+            <Link href="/dashboard/tables/new">
+              <Plus className="h-4 w-4 mr-2" />
+              Create New
+            </Link>
           </Button>
         </div>
 
         {/* Stats Cards */}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Workspaces</CardTitle>
-              <Database className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">3</div>
-              <p className="text-xs text-muted-foreground">
-                +1 from last month
-              </p>
-            </CardContent>
+          <Card className="hover:shadow-md transition-shadow cursor-pointer">
+            <Link href="/dashboard/workspaces">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Workspaces</CardTitle>
+                <Database className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">3</div>
+                <p className="text-xs text-muted-foreground">
+                  +1 from last month
+                </p>
+              </CardContent>
+            </Link>
           </Card>
           
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Tables</CardTitle>
-              <Table className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">12</div>
-              <p className="text-xs text-muted-foreground">
-                +4 from last month
-              </p>
-            </CardContent>
+          <Card className="hover:shadow-md transition-shadow cursor-pointer">
+            <Link href="/dashboard/tables">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Tables</CardTitle>
+                <Table className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">12</div>
+                <p className="text-xs text-muted-foreground">
+                  +4 from last month
+                </p>
+              </CardContent>
+            </Link>
           </Card>
           
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Folders</CardTitle>
-              <FolderOpen className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">8</div>
-              <p className="text-xs text-muted-foreground">
-                +2 from last month
-              </p>
-            </CardContent>
+          <Card className="hover:shadow-md transition-shadow cursor-pointer">
+            <Link href="/dashboard/workspaces">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Folders</CardTitle>
+                <FolderOpen className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">8</div>
+                <p className="text-xs text-muted-foreground">
+                  +2 from last month
+                </p>
+              </CardContent>
+            </Link>
           </Card>
           
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Shared Items</CardTitle>
-              <Users className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">24</div>
-              <p className="text-xs text-muted-foreground">
-                +6 from last month
-              </p>
-            </CardContent>
+          <Card className="hover:shadow-md transition-shadow cursor-pointer">
+            <Link href="/dashboard/shared">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Shared Items</CardTitle>
+                <Users className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">24</div>
+                <p className="text-xs text-muted-foreground">
+                  +6 from last month
+                </p>
+              </CardContent>
+            </Link>
           </Card>
         </div>
 
@@ -128,24 +139,32 @@ export default function DashboardPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Button variant="outline" className="w-full justify-start">
-                <Database className="h-4 w-4 mr-2" />
-                Create Workspace
+              <Button variant="outline" className="w-full justify-start" asChild>
+                <Link href="/dashboard/workspaces/new">
+                  <Database className="h-4 w-4 mr-2" />
+                  Create Workspace
+                </Link>
               </Button>
               
-              <Button variant="outline" className="w-full justify-start">
-                <FolderOpen className="h-4 w-4 mr-2" />
-                New Folder
+              <Button variant="outline" className="w-full justify-start" asChild>
+                <Link href="/dashboard/folders/new">
+                  <FolderOpen className="h-4 w-4 mr-2" />
+                  New Folder
+                </Link>
               </Button>
               
-              <Button variant="outline" className="w-full justify-start">
-                <Table className="h-4 w-4 mr-2" />
-                Import Table
+              <Button variant="outline" className="w-full justify-start" asChild>
+                <Link href="/dashboard/tables/import">
+                  <Table className="h-4 w-4 mr-2" />
+                  Import Table
+                </Link>
               </Button>
               
-              <Button variant="outline" className="w-full justify-start">
-                <Users className="h-4 w-4 mr-2" />
-                Invite Team Member
+              <Button variant="outline" className="w-full justify-start" asChild>
+                <Link href="/dashboard/settings#team">
+                  <Users className="h-4 w-4 mr-2" />
+                  Invite Team Member
+                </Link>
               </Button>
             </CardContent>
           </Card>

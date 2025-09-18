@@ -24,8 +24,8 @@ import {
   FileText,
   FolderOpen,
   BarChart3,
-  Database,
-  Settings,
+  Upload,
+  Download,
   Share,
   Edit,
   Trash2,
@@ -40,82 +40,80 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
-interface WorkspacePageProps {
+interface FolderPageProps {
   params: {
     id: string;
+    folderId: string;
   };
 }
 
-// Mock data for workspace
-const workspaceData = {
+// Mock data for folder contents
+const folderData = {
   id: '1',
-  name: 'My Workspace',
-  description: 'Personal workspace for data projects',
-  created: '3 months ago',
+  name: 'Projects',
+  workspace: 'My Workspace',
+  description: 'Project-related tables and data',
+  created: '2 months ago',
   owner: {
     name: 'John Doe',
     email: 'john.doe@company.com',
     avatar: '/avatars/john.jpg'
   },
-  collaborators: 8,
-  totalFolders: 4,
-  totalTables: 12
+  collaborators: 5,
+  totalItems: 8
 };
 
-const workspaceItems = [
+const folderItems = [
   {
     id: 1,
-    type: 'folder',
-    name: 'Projects',
-    description: 'Active project data and documentation',
-    items: 8,
+    type: 'table',
+    name: 'Customer Database',
+    description: 'Customer information and contact details',
+    rows: 1247,
+    columns: 12,
     lastModified: '2 hours ago',
     modifiedBy: 'Sarah Johnson',
-    collaborators: 5
+    shared: true,
+    visibility: 'private',
+    size: '2.3 MB'
   },
   {
     id: 2,
-    type: 'folder',
-    name: 'Operations',
-    description: 'Operational data and reports',
-    items: 12,
+    type: 'table',
+    name: 'Project Timeline',
+    description: 'Project milestones and deadlines',
+    rows: 156,
+    columns: 8,
     lastModified: '1 day ago',
     modifiedBy: 'Mike Chen',
-    collaborators: 3
+    shared: false,
+    visibility: 'public',
+    size: '456 KB'
   },
   {
     id: 3,
-    type: 'table',
-    name: 'Team Directory',
-    description: 'Employee contact information',
-    rows: 156,
-    columns: 8,
-    lastModified: '3 days ago',
+    type: 'folder',
+    name: 'Archive',
+    description: 'Archived project data',
+    items: 12,
+    lastModified: '1 week ago',
     modifiedBy: 'Emma Davis',
-    shared: true,
-    visibility: 'private'
+    shared: false,
+    visibility: 'private',
+    size: '15.7 MB'
   },
   {
     id: 4,
-    type: 'folder',
-    name: 'Reports',
-    description: 'Monthly and quarterly reports',
-    items: 6,
-    lastModified: '1 week ago',
-    modifiedBy: 'Alex Rodriguez',
-    collaborators: 4
-  },
-  {
-    id: 5,
     type: 'table',
-    name: 'Budget Overview',
-    description: 'Annual budget breakdown',
+    name: 'Budget Tracker',
+    description: 'Project budget and expenses',
     rows: 89,
-    columns: 12,
-    lastModified: '2 weeks ago',
-    modifiedBy: 'Lisa Wang',
-    shared: false,
-    visibility: 'private'
+    columns: 6,
+    lastModified: '3 days ago',
+    modifiedBy: 'Alex Rodriguez',
+    shared: true,
+    visibility: 'private',
+    size: '234 KB'
   }
 ];
 
@@ -130,7 +128,7 @@ const getItemIcon = (type: string) => {
   }
 };
 
-export default function WorkspacePage({ params }: WorkspacePageProps) {
+export default function FolderPage({ params }: FolderPageProps) {
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -146,7 +144,13 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
             </BreadcrumbItem>
             <BreadcrumbSeparator />
             <BreadcrumbItem>
-              <BreadcrumbPage>{workspaceData.name}</BreadcrumbPage>
+              <BreadcrumbLink href={`/dashboard/workspaces/${params.id}`}>
+                {folderData.workspace}
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>{folderData.name}</BreadcrumbPage>
             </BreadcrumbItem>
           </BreadcrumbList>
         </Breadcrumb>
@@ -155,53 +159,44 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
         <div className="flex items-center justify-between">
           <div className="space-y-1">
             <div className="flex items-center space-x-2">
-              <Database className="h-8 w-8 text-blue-600" />
-              <h1 className="text-3xl font-bold tracking-tight">{workspaceData.name}</h1>
+              <FolderOpen className="h-8 w-8 text-blue-600" />
+              <h1 className="text-3xl font-bold tracking-tight">{folderData.name}</h1>
             </div>
             <p className="text-muted-foreground">
-              {workspaceData.description}
+              {folderData.description}
             </p>
             <div className="flex items-center space-x-4 text-sm text-muted-foreground">
-              <span>{workspaceData.totalFolders} folders</span>
+              <span>{folderData.totalItems} items</span>
               <span>•</span>
-              <span>{workspaceData.totalTables} tables</span>
-              <span>•</span>
-              <span>Created {workspaceData.created}</span>
+              <span>Created {folderData.created}</span>
               <span>•</span>
               <div className="flex items-center space-x-1">
                 <Users className="h-3 w-3" />
-                <span>{workspaceData.collaborators} collaborators</span>
+                <span>{folderData.collaborators} collaborators</span>
               </div>
             </div>
           </div>
           <div className="flex items-center space-x-2">
-            <Button variant="outline" size="sm">
-              <Settings className="h-4 w-4 mr-2" />
-              Settings
-            </Button>
             <Button variant="outline" size="sm">
               <Share className="h-4 w-4 mr-2" />
               Share
             </Button>
             <Button>
               <Plus className="h-4 w-4 mr-2" />
-              New Item
+              Add Item
             </Button>
           </div>
         </div>
 
-        {/* Workspace Stats */}
+        {/* Folder Stats */}
         <div className="grid gap-4 md:grid-cols-4">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Folders</CardTitle>
-              <FolderOpen className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Total Items</CardTitle>
+              <FileText className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{workspaceData.totalFolders}</div>
-              <p className="text-xs text-muted-foreground">
-                +2 from last month
-              </p>
+              <div className="text-2xl font-bold">{folderData.totalItems}</div>
             </CardContent>
           </Card>
           
@@ -211,10 +206,21 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
               <BarChart3 className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{workspaceData.totalTables}</div>
-              <p className="text-xs text-muted-foreground">
-                +5 from last month
-              </p>
+              <div className="text-2xl font-bold">
+                {folderItems.filter(item => item.type === 'table').length}
+              </div>
+            </CardContent>
+          </Card>
+          
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Subfolders</CardTitle>
+              <FolderOpen className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">
+                {folderItems.filter(item => item.type === 'folder').length}
+              </div>
             </CardContent>
           </Card>
           
@@ -224,23 +230,7 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
               <Users className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{workspaceData.collaborators}</div>
-              <p className="text-xs text-muted-foreground">
-                +1 from last month
-              </p>
-            </CardContent>
-          </Card>
-          
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Storage</CardTitle>
-              <Database className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">24.7 GB</div>
-              <p className="text-xs text-muted-foreground">
-                78% of quota used
-              </p>
+              <div className="text-2xl font-bold">{folderData.collaborators}</div>
             </CardContent>
           </Card>
         </div>
@@ -251,7 +241,7 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search workspace..."
+                placeholder="Search in folder..."
                 className="pl-8 w-[300px]"
               />
             </div>
@@ -260,11 +250,21 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
               Filter
             </Button>
           </div>
+          <div className="flex items-center space-x-2">
+            <Button variant="outline" size="sm">
+              <Upload className="h-4 w-4 mr-2" />
+              Import
+            </Button>
+            <Button variant="outline" size="sm">
+              <Download className="h-4 w-4 mr-2" />
+              Export
+            </Button>
+          </div>
         </div>
 
-        {/* Workspace Contents */}
+        {/* Folder Contents */}
         <div className="space-y-3">
-          {workspaceItems.map((item) => (
+          {folderItems.map((item) => (
             <Card key={item.id} className="hover:shadow-md transition-shadow">
               <CardContent className="p-4">
                 <div className="flex items-center justify-between">
@@ -276,17 +276,15 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center space-x-2">
                         <h3 className="font-medium truncate">{item.name}</h3>
-                        {item.type === 'table' && item.visibility && (
-                          <Badge variant={item.visibility === 'public' ? 'default' : 'secondary'}>
-                            {item.visibility === 'public' ? (
-                              <Globe className="h-3 w-3 mr-1" />
-                            ) : (
-                              <Lock className="h-3 w-3 mr-1" />
-                            )}
-                            {item.visibility}
-                          </Badge>
-                        )}
-                        {item.type === 'table' && item.shared && (
+                        <Badge variant={item.visibility === 'public' ? 'default' : 'secondary'}>
+                          {item.visibility === 'public' ? (
+                            <Globe className="h-3 w-3 mr-1" />
+                          ) : (
+                            <Lock className="h-3 w-3 mr-1" />
+                          )}
+                          {item.visibility}
+                        </Badge>
+                        {item.shared && (
                           <Badge variant="outline">
                             <Share className="h-3 w-3 mr-1" />
                             Shared
@@ -304,12 +302,10 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                             <span>{item.columns} columns</span>
                           </>
                         ) : (
-                          <>
-                            <span>{item.items} items</span>
-                            <span>•</span>
-                            <span>{item.collaborators} collaborators</span>
-                          </>
+                          <span>{item.items} items</span>
                         )}
+                        <span>•</span>
+                        <span>{item.size}</span>
                         <span>•</span>
                         <span>Modified {item.lastModified} by {item.modifiedBy}</span>
                       </div>
@@ -338,6 +334,10 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                           <Share className="h-4 w-4 mr-2" />
                           Share
                         </DropdownMenuItem>
+                        <DropdownMenuItem>
+                          <Download className="h-4 w-4 mr-2" />
+                          Download
+                        </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem className="text-red-600">
                           <Trash2 className="h-4 w-4 mr-2" />
@@ -353,21 +353,21 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
         </div>
 
         {/* Empty State */}
-        {workspaceItems.length === 0 && (
+        {folderItems.length === 0 && (
           <Card className="text-center py-12">
             <CardContent className="space-y-4">
               <div className="w-16 h-16 mx-auto bg-muted rounded-full flex items-center justify-center">
-                <Database className="h-8 w-8 text-muted-foreground" />
+                <FolderOpen className="h-8 w-8 text-muted-foreground" />
               </div>
               <div>
-                <h3 className="text-lg font-semibold">Workspace is empty</h3>
+                <h3 className="text-lg font-semibold">Folder is empty</h3>
                 <p className="text-muted-foreground mt-1">
-                  Create folders and tables to organize your data.
+                  Add tables or create subfolders to organize your data.
                 </p>
               </div>
               <Button>
                 <Plus className="h-4 w-4 mr-2" />
-                Create Item
+                Add Item
               </Button>
             </CardContent>
           </Card>

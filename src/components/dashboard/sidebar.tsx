@@ -70,9 +70,11 @@ export function Sidebar({ className }: SidebarProps) {
             <h2 className="text-lg font-semibold">DataTables</h2>
           </div>
           
-          <Button className="w-full justify-start" size="sm">
-            <Plus className="h-4 w-4 mr-2" />
-            New Workspace
+          <Button className="w-full justify-start" size="sm" asChild>
+            <Link href="/dashboard/workspaces/new">
+              <Plus className="h-4 w-4 mr-2" />
+              New Workspace
+            </Link>
           </Button>
         </div>
         
