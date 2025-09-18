@@ -7,6 +7,7 @@ import { AuditLogger } from '@/lib/audit-logger';
 import { UpdateRowRequest, ApiResponse } from '@/lib/types';
 import { updateRowSchema, handleApiError, NotFoundError, ValidationError, validateCellValue } from '@/lib/validation';
 import { FormulaIntegration } from '@/lib/formula/integration';
+import { ComputedColumnsService } from '@/lib/formula/computed-columns';
 
 interface Params {
   params: {
@@ -190,6 +191,35 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       }
     }
 
+    // Propagate changes to computed columns that depend on the changed columns
+    const changedColumnIds = cellUpdates.map(update => update.columnId);
+    let propagationResults;
+    
+    if (changedColumnIds.length > 0) {
+      // For each changed column, check if computed columns depend on it
+      const allPropagationResults = [];
+      
+      for (const changedColumnId of changedColumnIds) {
+        try {
+          const result = await ComputedColumnsService.propagateColumnChanges(
+            tableId,
+            changedColumnId,
+            [rowId] // Only recalculate for this specific row
+          );
+          allPropagationResults.push(result);
+        } catch (error) {
+          console.error(`Error propagating changes for column ${changedColumnId}:`, error);
+        }
+      }
+      
+      // Aggregate results
+      propagationResults = {
+        totalAffectedComputedColumns: allPropagationResults.reduce((sum, r) => sum + r.affectedComputedColumns, 0),
+        totalRecalculatedCells: allPropagationResults.reduce((sum, r) => sum + r.recalculatedCells, 0),
+        allErrors: allPropagationResults.flatMap(r => r.errors),
+      };
+    }
+
     // Get updated row data
     const updatedCells = await db
       .select()
@@ -230,8 +260,15 @@ export async function PATCH(request: NextRequest, { params }: Params) {
         createdAt: updatedRow[0].createdAt,
         updatedAt: updatedRow[0].updatedAt,
         data: updatedData,
+        propagation: propagationResults && propagationResults.totalRecalculatedCells > 0 ? {
+          affectedComputedColumns: propagationResults.totalAffectedComputedColumns,
+          recalculatedCells: propagationResults.totalRecalculatedCells,
+          errors: propagationResults.allErrors,
+        } : undefined,
       },
-      message: 'Row updated successfully',
+      message: propagationResults && propagationResults.totalRecalculatedCells > 0
+        ? 'Row updated and computed columns recalculated successfully'
+        : 'Row updated successfully',
     };
 
     return NextResponse.json(response);

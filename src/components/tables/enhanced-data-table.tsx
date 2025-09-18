@@ -68,6 +68,8 @@ export interface Column {
   type: string;
   position: number;
   isVisible?: boolean;
+  isComputed?: boolean;
+  formula?: string;
 }
 
 export interface Cell {
@@ -611,17 +613,21 @@ export function EnhancedDataTable({
     const isDependent = dependentCells.has(cellKey);
     const isFocused = focusedCell?.rowId === rowId && focusedCell?.columnId === columnId;
     const isEditing = editingCell?.rowId === rowId && editingCell?.columnId === columnId;
+    const column = columns.find(col => col.id === columnId);
+    const isComputed = column?.isComputed || false;
     
     return cn(
-      "cursor-pointer hover:bg-accent rounded px-2 py-1 min-h-[32px] flex items-center relative",
+      "rounded px-2 py-1 min-h-[32px] flex items-center relative",
       {
+        "cursor-pointer hover:bg-accent": !isComputed,
+        "cursor-default bg-gray-50": isComputed,
         "bg-blue-50 border-blue-200 border": isFocused,
         "bg-green-50 border-green-200 border": isHighlighted,
         "bg-orange-50 border-orange-200 border": isDependent,
-        "bg-accent": isEditing,
+        "bg-accent": isEditing && !isComputed,
       }
     );
-  }, [focusedCell, editingCell, highlightedCells, dependentCells, getCellKey]);
+  }, [focusedCell, editingCell, highlightedCells, dependentCells, getCellKey, columns]);
 
   // Row selection handlers - fixed for proper individual and multi-selection
   const handleRowSelect = useCallback((rowId: number, mode: 'single' | 'toggle' | 'range' = 'single') => {
@@ -1266,6 +1272,24 @@ export function EnhancedDataTable({
             Name und Typ ändern
           </DropdownMenuItem>
           
+          {/* Computed Column Section */}
+          {column.isComputed && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="px-2 py-1.5 text-sm font-semibold">
+                Berechnete Spalte
+              </DropdownMenuLabel>
+              <div className="px-2 pb-2">
+                <div className="text-xs text-gray-600 mb-2">
+                  Formel: <code className="bg-gray-100 px-1 rounded">{column.formula}</code>
+                </div>
+                <Badge variant="secondary" className="text-xs">
+                  Automatisch berechnet
+                </Badge>
+              </div>
+            </>
+          )}
+          
           <DropdownMenuSeparator />
           
           {/* Insert Column Section */}
@@ -1566,13 +1590,25 @@ export function EnhancedDataTable({
                               <div
                                 className={getCellClassName(row.id, column.id)}
                                 onClick={() => handleCellFocus(row.id, column.id)}
-                                onDoubleClick={() => handleCellEdit(row.id, column.id, cell?.formula || cell?.value?.toString() || '')}
+                                onDoubleClick={() => {
+                                  // Don't allow editing computed columns
+                                  if (!column.isComputed) {
+                                    handleCellEdit(row.id, column.id, cell?.formula || cell?.value?.toString() || '');
+                                  }
+                                }}
                                 onMouseDown={(e) => handleCellMouseDown(row.id, column.id, e)}
                                 onMouseEnter={() => handleCellMouseEnter(row.id, column.id)}
                                 onMouseUp={handleCellMouseUp}
                               >
                                 <div className="flex items-center justify-between w-full overflow-hidden">
-                                  <span className="truncate">
+                                  <div className="flex items-center space-x-1 flex-1 overflow-hidden">
+                                    {/* fx-Badge for computed columns */}
+                                    {column.isComputed && (
+                                      <Badge variant="secondary" className="text-xs font-mono px-1 py-0 h-4 shrink-0">
+                                        fx
+                                      </Badge>
+                                    )}
+                                    <span className="truncate">
                                     {column.type === 'select' ? (
                                       <Select
                                         value={cell?.value || ''}
@@ -1621,26 +1657,43 @@ export function EnhancedDataTable({
                                       })()
                                     )}
                                   </span>
+                                 </div>
                                   
-                                  {/* Fehler-Icon */}
-                                  {cell?.errorCode && (
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <AlertTriangle className="h-3 w-3 text-destructive ml-1" />
-                                      </TooltipTrigger>
-                                      <TooltipContent>
-                                        <div className="max-w-sm">
-                                          <div className="font-semibold">Formel-Fehler</div>
-                                          <div className="text-xs">{cell.errorCode}</div>
-                                        </div>
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  )}
-                                  
-                                  {/* Formel-Indikator */}
-                                  {cell?.formula && (
-                                    <div className="absolute -top-1 -right-1 h-2 w-2 bg-blue-500 rounded-full" />
-                                  )}
+                                 <div className="flex items-center space-x-1 shrink-0">
+                                   {/* Fehler-Icon */}
+                                   {cell?.errorCode && (
+                                     <Tooltip>
+                                       <TooltipTrigger asChild>
+                                         <AlertTriangle className="h-3 w-3 text-destructive" />
+                                       </TooltipTrigger>
+                                       <TooltipContent>
+                                         <div className="max-w-sm">
+                                           <div className="font-semibold">Formel-Fehler</div>
+                                           <div className="text-xs">{cell.errorCode}</div>
+                                         </div>
+                                       </TooltipContent>
+                                     </Tooltip>
+                                   )}
+                                   
+                                   {/* Formel-Indikator für manuelle Formeln */}
+                                   {cell?.formula && !column.isComputed && (
+                                     <div className="h-2 w-2 bg-blue-500 rounded-full" />
+                                   )}
+                                   
+                                   {/* Read-only Indikator für computed columns */}
+                                   {column.isComputed && (
+                                     <Tooltip>
+                                       <TooltipTrigger asChild>
+                                         <div className="h-2 w-2 bg-gray-400 rounded-full" />
+                                       </TooltipTrigger>
+                                       <TooltipContent>
+                                         <div className="text-xs">
+                                           Berechnete Spalte - nur lesbar
+                                         </div>
+                                       </TooltipContent>
+                                     </Tooltip>
+                                   )}
+                                 </div>
                                 </div>
                               </div>
                             )}

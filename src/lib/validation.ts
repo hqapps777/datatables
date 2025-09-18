@@ -16,6 +16,21 @@ export const createColumnSchema = z.object({
     }).optional(),
   }).optional(),
   position: z.number().int().min(0).optional(),
+  isComputed: z.boolean().optional().default(false),
+  formula: z.string().optional(),
+}).refine((data) => {
+  // If isComputed is true, formula must be provided
+  if (data.isComputed && (!data.formula || data.formula.trim().length === 0)) {
+    return false;
+  }
+  // If formula is provided, it should start with =
+  if (data.formula && !data.formula.trim().startsWith('=')) {
+    return false;
+  }
+  return true;
+}, {
+  message: 'Formula is required for computed columns and must start with =',
+  path: ['formula'],
 });
 
 export const updateColumnSchema = z.object({
@@ -33,6 +48,21 @@ export const updateColumnSchema = z.object({
     }).optional(),
   }).optional(),
   position: z.number().int().min(0).optional(),
+  isComputed: z.boolean().optional(),
+  formula: z.string().optional(),
+}).refine((data) => {
+  // If isComputed is true, formula must be provided
+  if (data.isComputed && (!data.formula || data.formula.trim().length === 0)) {
+    return false;
+  }
+  // If formula is provided, it should start with =
+  if (data.formula && !data.formula.trim().startsWith('=')) {
+    return false;
+  }
+  return true;
+}, {
+  message: 'Formula is required for computed columns and must start with =',
+  path: ['formula'],
 });
 
 // Row validation schemas
