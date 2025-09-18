@@ -141,6 +141,7 @@ export function EnhancedDataTable({
   } | null>(null);
 
   const [editValue, setEditValue] = useState('');
+  const [pendingValues, setPendingValues] = useState<Map<string, any>>(new Map());
   const [selectedRange, setSelectedRange] = useState<{
     startRow: number;
     startCol: number;
@@ -183,21 +184,26 @@ export function EnhancedDataTable({
   // Column management dialog
   const [showColumnManager, setShowColumnManager] = useState(false);
   
-  // Column resizing with localStorage persistence
-  const [columnWidths, setColumnWidths] = useState<Map<number, number>>(() => {
-    if (typeof window !== 'undefined') {
+  // Column resizing with localStorage persistence - fix hydration mismatch
+  const [columnWidths, setColumnWidths] = useState<Map<number, number>>(new Map());
+  const [isColumnWidthsLoaded, setIsColumnWidthsLoaded] = useState(false);
+
+  // Load column widths after hydration
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !isColumnWidthsLoaded) {
       const saved = localStorage.getItem(`table-${tableId}-column-widths`);
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
-          return new Map(Object.entries(parsed).map(([k, v]) => [parseInt(k), v as number]));
+          const widthsMap = new Map(Object.entries(parsed).map(([k, v]) => [parseInt(k), v as number]));
+          setColumnWidths(widthsMap);
         } catch (e) {
           console.warn('Failed to parse saved column widths:', e);
         }
       }
+      setIsColumnWidthsLoaded(true);
     }
-    return new Map();
-  });
+  }, [tableId, isColumnWidthsLoaded]);
 
   // Visible columns
   const visibleColumns = useMemo(() =>
@@ -385,14 +391,20 @@ export function EnhancedDataTable({
 
   // Cell focus handler
   const handleCellFocus = useCallback((rowId: number, columnId: number) => {
-    const cell = getCellValue(rowId, columnId);
+    // Get the most current cell value from rows state directly
+    const currentRow = rows.find(r => r.id === rowId);
+    const cell = currentRow?.cells.find(c => c.columnId === columnId);
     const column = columns.find(col => col.id === columnId);
+    
+    // Check for pending updates
+    const cellKey = `${rowId}-${columnId}`;
+    const pendingValue = pendingValues.get(cellKey);
     
     setFocusedCell({
       rowId,
       columnId,
       columnName: column?.name || '',
-      value: cell?.value,
+      value: pendingValue !== undefined ? pendingValue : cell?.value,
       formula: cell?.formula,
       errorCode: cell?.errorCode,
     });
@@ -404,7 +416,7 @@ export function EnhancedDataTable({
       setHighlightedCells(new Set());
       setDependentCells(new Set());
     }
-  }, [getCellValue, columns]);
+  }, [rows, columns, pendingValues]);
 
   // Dependency highlighting
   const highlightDependencies = useCallback(async (formula: string, currentRow: number, currentCol: number) => {
@@ -448,6 +460,7 @@ export function EnhancedDataTable({
 
   // Cell editing
   const handleCellEdit = useCallback((rowId: number, columnId: number, currentValue: string) => {
+    console.log('🎯 Starting cell edit:', { rowId, columnId, currentValue });
     setEditingCell({ rowId, columnId });
     setEditValue(currentValue);
   }, []);
@@ -456,18 +469,55 @@ export function EnhancedDataTable({
     if (!editingCell) return;
     
     try {
-      await onCellUpdate(editingCell.rowId, editingCell.columnId, editValue);
+      console.log('🚀 Saving edit:', { editingCell, editValue });
+      
+      // Save the pending value immediately for instant display
+      const cellKey = `${editingCell.rowId}-${editingCell.columnId}`;
+      setPendingValues(prev => {
+        const newMap = new Map(prev);
+        newMap.set(cellKey, editValue);
+        return newMap;
+      });
+      
+      // Store the editing cell info before clearing
+      const savedEditingCell = { ...editingCell };
+      const savedEditValue = editValue;
+      
+      // Clear editing state
       setEditingCell(null);
       setEditValue('');
       
-      // Refresh focus after update
-      if (focusedCell && focusedCell.rowId === editingCell.rowId && focusedCell.columnId === editingCell.columnId) {
-        handleCellFocus(editingCell.rowId, editingCell.columnId);
-      }
+      console.log('💾 Calling onCellUpdate with:', {
+        rowId: savedEditingCell.rowId,
+        columnId: savedEditingCell.columnId,
+        value: savedEditValue
+      });
+      
+      // Call the backend update
+      await onCellUpdate(savedEditingCell.rowId, savedEditingCell.columnId, savedEditValue);
+      
+      console.log('✅ Update successful, clearing pending value');
+      
+      // Clear pending value after successful update
+      setPendingValues(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(cellKey);
+        return newMap;
+      });
+      
     } catch (error) {
-      console.error('Error saving cell:', error);
+      console.error('❌ Error saving cell:', error);
+      // On error, remove the pending value to revert
+      if (editingCell) {
+        const cellKey = `${editingCell.rowId}-${editingCell.columnId}`;
+        setPendingValues(prev => {
+          const newMap = new Map(prev);
+          newMap.delete(cellKey);
+          return newMap;
+        });
+      }
     }
-  }, [editingCell, editValue, onCellUpdate, focusedCell, handleCellFocus]);
+  }, [editingCell, editValue, onCellUpdate]);
 
   const handleCancelEdit = useCallback(() => {
     setEditingCell(null);
@@ -1507,7 +1557,10 @@ export function EnhancedDataTable({
                                     handleCancelEdit();
                                   }
                                 }}
-                                onBlur={handleSaveEdit}
+                                onBlur={() => {
+                                  // Small delay to prevent conflicts
+                                  setTimeout(handleSaveEdit, 100);
+                                }}
                               />
                             ) : (
                               <div
@@ -1544,7 +1597,28 @@ export function EnhancedDataTable({
                                         </SelectContent>
                                       </Select>
                                     ) : (
-                                      cell?.value?.toString() || ''
+                                      // Show pending update or actual cell value
+                                      (() => {
+                                        const cellKey = `${row.id}-${column.id}`;
+                                        const pendingValue = pendingValues.get(cellKey);
+                                        const actualValue = cell?.value?.toString() || '';
+                                        const displayValue = pendingValue !== undefined
+                                          ? pendingValue.toString()
+                                          : actualValue;
+                                        
+                                        // Debug log for first cell
+                                        if (row.id === 1 && column.id === 2) {
+                                          console.log('📱 Cell display logic:', {
+                                            cellKey,
+                                            pendingValue,
+                                            actualValue,
+                                            displayValue,
+                                            pendingValuesSize: pendingValues.size
+                                          });
+                                        }
+                                        
+                                        return displayValue;
+                                      })()
                                     )}
                                   </span>
                                   
