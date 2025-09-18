@@ -1493,20 +1493,22 @@ export function EnhancedDataTable({
                             }}
                           >
                             {isEditing ? (
-                              <div className="flex items-center space-x-1">
-                                <Input
-                                  value={editValue}
-                                  onChange={(e) => setEditValue(e.target.value)}
-                                  className="h-8"
-                                  autoFocus
-                                />
-                                <Button size="sm" variant="ghost" onClick={handleSaveEdit}>
-                                  <Save className="h-3 w-3" />
-                                </Button>
-                                <Button size="sm" variant="ghost" onClick={handleCancelEdit}>
-                                  <X className="h-3 w-3" />
-                                </Button>
-                              </div>
+                              <Input
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                className="h-8"
+                                autoFocus
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    handleSaveEdit();
+                                  } else if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    handleCancelEdit();
+                                  }
+                                }}
+                                onBlur={handleSaveEdit}
+                              />
                             ) : (
                               <div
                                 className={getCellClassName(row.id, column.id)}
