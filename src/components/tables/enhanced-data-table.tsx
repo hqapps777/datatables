@@ -210,6 +210,12 @@ export function EnhancedDataTable({
     columnId: number;
   } | null>(null);
   
+  // Column and Row Drag-to-Select state
+  const [isDraggingColumns, setIsDraggingColumns] = useState(false);
+  const [columnDragStart, setColumnDragStart] = useState<number | null>(null);
+  const [isDraggingRows, setIsDraggingRows] = useState(false);
+  const [rowDragStart, setRowDragStart] = useState<number | null>(null);
+  
   // Row selection and drag & drop - use external state if provided
   const [internalSelectedRows, setInternalSelectedRows] = useState<Set<number>>(new Set());
   
@@ -766,6 +772,64 @@ export function EnhancedDataTable({
     console.log('🔄 Column selection updated:', Array.from(newSelection));
   }, [selectedColumns, visibleColumns]);
 
+  // Column Header Drag-to-Select handlers
+  const handleColumnDragStart = useCallback((columnId: number, event: React.MouseEvent) => {
+    console.log('📋 Column drag-to-select started:', { columnId });
+    event.preventDefault();
+    
+    // Clear other selections
+    setSelectedRows(new Set());
+    setSelectedRange(null);
+    setFocusedCell(null);
+    
+    // Start column dragging with visual feedback
+    setIsDraggingColumns(true);
+    setColumnDragStart(columnId);
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    
+    // Set initial selection
+    setSelectedColumns(new Set([columnId]));
+  }, []);
+
+  const handleColumnDragEnter = useCallback((columnId: number) => {
+    if (isDraggingColumns && columnDragStart !== null) {
+      console.log('📋 Column drag extending to:', { from: columnDragStart, to: columnId });
+      
+      // Find start and end indices
+      const startIndex = visibleColumns.findIndex(col => col.id === columnDragStart);
+      const endIndex = visibleColumns.findIndex(col => col.id === columnId);
+      
+      if (startIndex !== -1 && endIndex !== -1) {
+        const minIndex = Math.min(startIndex, endIndex);
+        const maxIndex = Math.max(startIndex, endIndex);
+        
+        // Select all columns in range
+        const newSelection = new Set<number>();
+        for (let i = minIndex; i <= maxIndex; i++) {
+          newSelection.add(visibleColumns[i].id);
+        }
+        
+        setSelectedColumns(newSelection);
+        console.log('📋 Column selection extended:', Array.from(newSelection).map(id =>
+          visibleColumns.find(col => col.id === id)?.name
+        ));
+      }
+    }
+  }, [isDraggingColumns, columnDragStart, visibleColumns]);
+
+  const handleColumnDragEnd = useCallback(() => {
+    if (isDraggingColumns) {
+      console.log('📋 Column drag-to-select ended:', Array.from(selectedColumns));
+      setIsDraggingColumns(false);
+      setColumnDragStart(null);
+      
+      // Reset cursor and user selection
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+  }, [isDraggingColumns, selectedColumns]);
+
   // Multi-cell selection and range selection with formula insertion
   const handleCellMouseDown = useCallback((rowId: number, columnId: number, event: React.MouseEvent) => {
     console.log('🖱️ Mouse down on cell:', { rowId, columnId, buttons: event.buttons });
@@ -867,6 +931,63 @@ export function EnhancedDataTable({
       }
     }
   }, [isSelectingCells, selectedRange, focusedCell, formulaBarInsertRange]);
+
+  // Row Header Drag-to-Select handlers
+  const handleRowDragStart = useCallback((rowId: number, event: React.MouseEvent) => {
+    console.log('📋 Row drag-to-select started:', { rowId });
+    event.preventDefault();
+    event.stopPropagation();
+    
+    // Clear other selections
+    setSelectedColumns(new Set());
+    setSelectedRange(null);
+    setFocusedCell(null);
+    
+    // Start row dragging with visual feedback
+    setIsDraggingRows(true);
+    setRowDragStart(rowId);
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    
+    // Set initial selection
+    setSelectedRows(new Set([rowId]));
+  }, []);
+
+  const handleRowDragEnter = useCallback((rowId: number) => {
+    if (isDraggingRows && rowDragStart !== null) {
+      console.log('📋 Row drag extending to:', { from: rowDragStart, to: rowId });
+      
+      // Find start and end indices in visible rows
+      const startIndex = visibleRows.findIndex(row => row.id === rowDragStart);
+      const endIndex = visibleRows.findIndex(row => row.id === rowId);
+      
+      if (startIndex !== -1 && endIndex !== -1) {
+        const minIndex = Math.min(startIndex, endIndex);
+        const maxIndex = Math.max(startIndex, endIndex);
+        
+        // Select all rows in range
+        const newSelection = new Set<number>();
+        for (let i = minIndex; i <= maxIndex; i++) {
+          newSelection.add(visibleRows[i].id);
+        }
+        
+        setSelectedRows(newSelection);
+        console.log('📋 Row selection extended:', Array.from(newSelection));
+      }
+    }
+  }, [isDraggingRows, rowDragStart, visibleRows, setSelectedRows]);
+
+  const handleRowDragEnd = useCallback(() => {
+    if (isDraggingRows) {
+      console.log('📋 Row drag-to-select ended:', Array.from(selectedRows));
+      setIsDraggingRows(false);
+      setRowDragStart(null);
+      
+      // Reset cursor and user selection
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+  }, [isDraggingRows, selectedRows]);
 
   // Clear cell selection when clicking outside
   const handleClearCellSelection = useCallback(() => {
@@ -1254,7 +1375,7 @@ export function EnhancedDataTable({
     const column = columns.find(col => col.id === columnId);
     const isComputed = column?.isComputed || false;
     
-    // 🔧 FIXED: Convert rowId to visual position for correct highlighting
+    // Convert rowId to visual position for correct highlighting
     const currentRowVisualPosition = visibleRows.findIndex(r => r.id === rowId) + 1;
     
     // Check if cell is in selected range using visual positions
@@ -1273,26 +1394,34 @@ export function EnhancedDataTable({
       column.position <= copiedCells.range.endCol
     ) : false;
 
-    // Check if cell is in selected column
+    // Check if cell is in selected column - Enhanced for drag feedback
     const isInSelectedColumn = selectedColumns.has(columnId);
     
+    // Check if cell is in selected row
+    const isInSelectedRow = selectedRows.has(rowId);
+    
     return cn(
-      "px-2 py-1 min-h-[32px] flex items-center relative",
+      "px-2 py-1 min-h-[32px] flex items-center relative transition-colors",
       {
         "cursor-pointer": !isComputed,
         "cursor-default bg-gray-100": isComputed,
-        "bg-blue-100 ring-2 ring-blue-400": isFocused && !isEditing && !isInSelectedRange && !isInSelectedColumn,
-        "hover:bg-gray-50": !isComputed && !isFocused && !isEditing && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn,
-        "bg-green-50": isHighlighted && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn,
-        "bg-orange-50": isDependent && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn,
+        "bg-blue-100 ring-2 ring-blue-400": isFocused && !isEditing && !isInSelectedRange && !isInSelectedColumn && !isInSelectedRow,
+        "hover:bg-gray-50": !isComputed && !isFocused && !isEditing && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn && !isInSelectedRow,
+        "bg-green-50": isHighlighted && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn && !isInSelectedRow,
+        "bg-orange-50": isDependent && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn && !isInSelectedRow,
         "bg-white ring-2 ring-blue-500": isEditing && !isComputed,
         "bg-purple-100 ring-1 ring-purple-300": isInSelectedRange && !isEditing,
         "bg-yellow-50 ring-1 ring-yellow-300 ring-dashed": isInCopiedRange && !isInSelectedRange && !isEditing && !copiedCells?.isCut,
         "bg-red-50 ring-1 ring-red-300 ring-dashed": isInCopiedRange && !isInSelectedRange && !isEditing && copiedCells?.isCut,
-        "bg-blue-50 ring-1 ring-blue-200": isInSelectedColumn && !isEditing && !isInSelectedRange,
+        // Enhanced column selection with drag feedback
+        "bg-blue-50 ring-1 ring-blue-300": isInSelectedColumn && !isEditing && !isInSelectedRange && !isInSelectedRow,
+        "bg-blue-100 ring-2 ring-blue-400 shadow-sm": isInSelectedColumn && isDraggingColumns && !isEditing && !isInSelectedRange,
+        // Enhanced row selection with drag feedback
+        "bg-indigo-50 ring-1 ring-indigo-300": isInSelectedRow && !isEditing && !isInSelectedRange && !isInSelectedColumn,
+        "bg-indigo-100 ring-2 ring-indigo-400 shadow-sm": isInSelectedRow && isDraggingRows && !isEditing && !isInSelectedRange,
       }
     );
-  }, [focusedCell, editingCell, highlightedCells, dependentCells, getCellKey, columns, selectedRange, copiedCells]);
+  }, [focusedCell, editingCell, highlightedCells, dependentCells, getCellKey, columns, selectedRange, copiedCells, selectedColumns, selectedRows, isDraggingColumns, isDraggingRows, visibleRows]);
 
   // Row selection handlers - fixed for proper individual and multi-selection
   const handleRowSelect = useCallback((rowId: number, mode: 'single' | 'toggle' | 'range' = 'single') => {
@@ -1695,7 +1824,7 @@ export function EnhancedDataTable({
       console.log('⌨️ Key:', event.key, 'Ctrl:', ctrlKey, 'Focus:', !!focusedCell, 'Range:', !!selectedRange, 'Rows:', selectedRows.size);
 
       // More lenient focus check - handle copy/paste if we have any table interaction
-      if (!isTableFocused && !focusedCell && selectedRows.size === 0) {
+      if (!isTableFocused && !focusedCell && selectedRows.size === 0 && selectedColumns.size === 0) {
         console.log('⌨️ Not handling - no interaction');
         return;
       }
@@ -1705,9 +1834,13 @@ export function EnhancedDataTable({
         console.log('📋 COPY shortcut detected!');
         event.preventDefault();
         
-        // Priority: selected range > focused cell > selected rows
+        // Priority: selected range > selected columns > focused cell > selected rows
         if (selectedRange) {
           console.log('📋 Copying selected range');
+          handleCopy();
+        }
+        else if (selectedColumns.size > 0) {
+          console.log('📋 Copying selected columns');
           handleCopy();
         }
         else if (focusedCell) {
@@ -1821,6 +1954,13 @@ export function EnhancedDataTable({
       
       if (tableContainer && !tableContainer.contains(target)) {
         handleClearCellSelection();
+        // Also clear drag states when clicking outside
+        if (isDraggingColumns) {
+          handleColumnDragEnd();
+        }
+        if (isDraggingRows) {
+          handleRowDragEnd();
+        }
       }
     };
 
@@ -1828,7 +1968,7 @@ export function EnhancedDataTable({
       document.addEventListener('click', handleDocumentClick);
       return () => document.removeEventListener('click', handleDocumentClick);
     }
-  }, [selectedRange, isSelectingCells, handleClearCellSelection]);
+  }, [selectedRange, isSelectingCells, handleClearCellSelection, isDraggingColumns, isDraggingRows]);
 
   // Column resizing handlers
   const handleResizeStart = useCallback((e: React.MouseEvent, columnId: number) => {
@@ -2326,34 +2466,58 @@ export function EnhancedDataTable({
                     {visibleColumns.map((column, index) => (
                       <TableHead
                         key={column.id}
-                        className="font-semibold border-r border-gray-300 relative group bg-gray-50"
+                        className={cn(
+                          "font-semibold border-r border-gray-300 relative group bg-gray-50 transition-colors",
+                          selectedColumns.has(column.id) && "bg-blue-100 border-blue-300",
+                          isDraggingColumns && selectedColumns.has(column.id) && "bg-blue-200 shadow-lg ring-2 ring-blue-400"
+                        )}
                         style={{
                           width: `${getColumnWidth(column.id)}px`,
                           minWidth: '80px',
-                          maxWidth: `${getColumnWidth(column.id)}px`
+                          maxWidth: `${getColumnWidth(column.id)}px`,
+                          cursor: isDraggingColumns ? 'grabbing' : 'default'
                         }}
                       >
                         <div className="flex items-center justify-between pr-2 relative">
                           <div className="flex items-center space-x-2 flex-1 min-w-0">
                              <span
-                               className="truncate font-medium cursor-pointer hover:text-blue-600 transition-colors"
+                               className={cn(
+                                 "truncate font-medium cursor-pointer hover:text-blue-600 transition-colors select-none",
+                                 selectedColumns.has(column.id) && "text-blue-600 font-semibold"
+                               )}
                                onClick={(e) => {
-                                 e.stopPropagation();
-                                 if (e.shiftKey && selectedColumns.size > 0) {
-                                   handleColumnSelect(column.id, 'range');
-                                 } else if (e.ctrlKey || e.metaKey) {
-                                   handleColumnSelect(column.id, 'toggle');
-                                 } else {
-                                   handleColumnSelect(column.id, 'single');
+                                 // Only handle click if not dragging
+                                 if (!isDraggingColumns) {
+                                   e.stopPropagation();
+                                   if (e.shiftKey && selectedColumns.size > 0) {
+                                     handleColumnSelect(column.id, 'range');
+                                   } else if (e.ctrlKey || e.metaKey) {
+                                     handleColumnSelect(column.id, 'toggle');
+                                   } else {
+                                     handleColumnSelect(column.id, 'single');
+                                   }
                                  }
                                }}
+                               onMouseDown={(e) => {
+                                 // Start drag-to-select on mouse down (but not on modifier keys)
+                                 if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+                                   handleColumnDragStart(column.id, e);
+                                 }
+                               }}
+                               onMouseEnter={() => {
+                                 // Extend selection ONLY when actively dragging
+                                 if (isDraggingColumns) {
+                                   handleColumnDragEnter(column.id);
+                                 }
+                               }}
+                               onMouseUp={handleColumnDragEnd}
                                onDoubleClick={(e) => {
                                  e.preventDefault();
                                  e.stopPropagation();
                                  handleEditColumn(column.id);
                                }}
                                onContextMenu={(e) => handleColumnContextMenu(e, column.id)}
-                               title={`Klick zum Markieren, Doppelklick zum Bearbeiten von "${column.name}"`}
+                               title={`Klick und ziehen für Mehrfachauswahl, Doppelklick zum Bearbeiten von "${column.name}"`}
                              >
                                {column.name}
                              </span>
@@ -2423,7 +2587,14 @@ export function EnhancedDataTable({
                       <React.Fragment key={row.id}>
                     <TableRow
                       key={row.id}
-                      className={cn(getRowClassName(row.id), "border-b border-gray-200")}
+                      className={cn(
+                        getRowClassName(row.id),
+                        "border-b border-gray-200 transition-colors",
+                        isDraggingRows && selectedRows.has(row.id) && "bg-blue-100 shadow-lg ring-2 ring-blue-400"
+                      )}
+                      style={{
+                        cursor: isDraggingRows ? 'grabbing' : 'default'
+                      }}
                       onClick={(e) => {
                         // Zeilen-Auswahl nur durch explizite Row-Area Klicks (nicht durch Zell-Klicks)
                         e.preventDefault();
@@ -2451,16 +2622,50 @@ export function EnhancedDataTable({
                       }}
                     >
                       {/* ID Cell with fixed row numbers */}
-                      <TableCell className="w-12 p-0 group border-r border-gray-300" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-center relative px-2 py-1" style={{ minHeight: '32px' }}>
+                      <TableCell
+                        className={cn(
+                          "w-12 p-0 group border-r border-gray-300 transition-colors",
+                          selectedRows.has(row.id) && "bg-blue-50 border-blue-300",
+                          isDraggingRows && selectedRows.has(row.id) && "bg-blue-200"
+                        )}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div
+                          className="flex items-center justify-center relative px-2 py-1"
+                          style={{
+                            minHeight: '32px',
+                            cursor: isDraggingRows ? 'grabbing' : 'default'
+                          }}
+                        >
                           <span className={cn(
-                            "text-sm text-gray-600 font-mono transition-opacity cursor-pointer absolute inset-0 flex items-center justify-center",
-                            selectedRows.has(row.id) ? "opacity-0" : "group-hover:opacity-0"
+                            "text-sm text-gray-600 font-mono transition-opacity cursor-pointer absolute inset-0 flex items-center justify-center select-none",
+                            selectedRows.has(row.id) ? "opacity-0" : "group-hover:opacity-0",
+                            selectedRows.has(row.id) && "text-blue-600 font-semibold"
                           )}
                           onClick={(e) => {
-                            e.stopPropagation();
-                            handleRowSelect(row.id, 'toggle'); // Click number = toggle for multi-select
-                          }}>
+                            // Only handle click if not dragging
+                            if (!isDraggingRows) {
+                              e.stopPropagation();
+                              handleRowSelect(row.id, 'toggle'); // Click number = toggle for multi-select
+                            }
+                          }}
+                          onMouseDown={(e) => {
+                            console.log('🖱️ Row mouseDown triggered:', { rowId: row.id });
+                            // Start row drag-to-select on mouse down (but not on modifier keys)
+                            if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              handleRowDragStart(row.id, e);
+                            }
+                          }}
+                          onMouseEnter={() => {
+                            // Extend row selection ONLY when dragging
+                            if (isDraggingRows) {
+                              handleRowDragEnter(row.id);
+                            }
+                          }}
+                          onMouseUp={handleRowDragEnd}
+                          title={`Zeile ${index + 1} - Klick und ziehen für Mehrfachauswahl`}>
                             {index + 1}
                           </span>
                           <div className={cn(
