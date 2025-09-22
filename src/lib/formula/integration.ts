@@ -310,6 +310,27 @@ export class FormulaIntegration {
   }
 
   /**
+   * Update row order in formula engine for correct A1 references after drag & drop
+   */
+  static async updateRowOrder(tableId: number, newRowOrder: number[]): Promise<void> {
+    try {
+      const engine = await FormulaEngine.getInstance(tableId);
+      const cellMapper = engine.getCellMapper();
+      cellMapper.updateRowOrder(newRowOrder);
+      
+      // Trigger recalculation of all cells to update references
+      const formulas = engine.getAllFormulas();
+      const allA1Refs = Array.from(formulas.keys());
+      
+      if (allA1Refs.length > 0) {
+        await engine.recalcAffected(allA1Refs);
+      }
+    } catch (error) {
+      console.error('Error updating row order in formula engine:', error);
+    }
+  }
+
+  /**
    * Clear formula engine cache for a table (useful for cleanup)
    */
   static clearTableCache(tableId: number): void {

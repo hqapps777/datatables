@@ -20,7 +20,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { FormulaBar } from './formula-bar';
-import { AlertTriangle, Save, X, GripVertical, Filter, ChevronDown, Edit, Plus, SortAsc, SortDesc, Eye, EyeOff, Trash2, Settings, Columns } from 'lucide-react';
+import { AlertTriangle, Save, X, GripVertical, Filter, ChevronDown, Edit, Plus, SortAsc, SortDesc, Eye, EyeOff, Trash2, Settings, Columns, Download, Upload, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -33,6 +33,7 @@ import {
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { CSVColumnMappingDialog } from './csv-column-mapping-dialog';
 
 // Custom checkbox component that supports indeterminate state
 const SelectAllCheckbox = ({ checked, indeterminate, onChange, className, title }: {
@@ -70,6 +71,8 @@ export interface Column {
   isVisible?: boolean;
   isComputed?: boolean;
   formula?: string;
+  options?: string[]; // For select type columns
+  optionColors?: Record<string, { bg: string; text: string }>; // Separate bg and text colors for select options
 }
 
 export interface Cell {
@@ -107,6 +110,10 @@ export interface EnhancedDataTableProps {
   onColumnInsert?: (afterColumnId: number, direction: 'left' | 'right') => Promise<void>;
   onColumnDelete?: (columnId: number) => Promise<void>;
   onColumnHide?: (columnId: number) => Promise<void>;
+  onCSVImport?: (file: File, mappings?: any) => Promise<void>;
+  onCSVExport?: (options?: { includeFormulas?: boolean }) => Promise<void>;
+  selectedRows?: Set<number>;
+  onSelectedRowsChange?: (selectedRows: Set<number>) => void;
 }
 
 export function EnhancedDataTable({
@@ -122,7 +129,11 @@ export function EnhancedDataTable({
   onColumnInsert,
   onColumnDelete,
   onColumnHide,
-  onRowUnhide
+  onRowUnhide,
+  onCSVImport,
+  onCSVExport,
+  selectedRows: externalSelectedRows,
+  onSelectedRowsChange
 }: EnhancedDataTableProps) {
   // State
   const [focusedCell, setFocusedCell] = useState<{
@@ -144,6 +155,13 @@ export function EnhancedDataTable({
 
   const [editValue, setEditValue] = useState('');
   const [pendingValues, setPendingValues] = useState<Map<string, any>>(new Map());
+  
+  // Select cell editing state
+  const [editingSelectCell, setEditingSelectCell] = useState<{
+    rowId: number;
+    columnId: number;
+  } | null>(null);
+  const [selectEditValue, setSelectEditValue] = useState('');
   const [selectedRange, setSelectedRange] = useState<{
     startRow: number;
     startCol: number;
@@ -151,11 +169,53 @@ export function EnhancedDataTable({
     endCol: number;
   } | null>(null);
 
+  // Multi-cell selection state
+  const [isSelectingCells, setIsSelectingCells] = useState(false);
+  const [cellSelectionStart, setCellSelectionStart] = useState<{
+    rowId: number;
+    columnId: number;
+  } | null>(null);
+
   const [highlightedCells, setHighlightedCells] = useState<Set<string>>(new Set());
   const [dependentCells, setDependentCells] = useState<Set<string>>(new Set());
   
-  // Row selection and drag & drop
-  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  // Copy & Paste state
+  const [copiedCells, setCopiedCells] = useState<{
+    data: Array<Array<{ value: any; formula?: string }>>;
+    range: { startRow: number; startCol: number; endRow: number; endCol: number };
+    isCut?: boolean;
+    selectionType?: 'rows' | 'columns' | 'range';
+    selectedRowIds?: number[];
+    selectedColumnIds?: number[];
+  } | null>(null);
+
+  // Context menu state
+  const [cellContextMenu, setCellContextMenu] = useState<{
+    x: number;
+    y: number;
+    rowId: number;
+    columnId: number;
+  } | null>(null);
+
+  const [columnContextMenu, setColumnContextMenu] = useState<{
+    x: number;
+    y: number;
+    columnId: number;
+  } | null>(null);
+
+  // Excel-like selection state
+  const [selectedColumns, setSelectedColumns] = useState<Set<number>>(new Set());
+  const [lastSelectedCell, setLastSelectedCell] = useState<{
+    rowId: number;
+    columnId: number;
+  } | null>(null);
+  
+  // Row selection and drag & drop - use external state if provided
+  const [internalSelectedRows, setInternalSelectedRows] = useState<Set<number>>(new Set());
+  
+  // Fix: Ensure consistency between state and setter - both must be external or both internal
+  const selectedRows = externalSelectedRows || internalSelectedRows;
+  const setSelectedRows = (externalSelectedRows && onSelectedRowsChange) ? onSelectedRowsChange : setInternalSelectedRows;
   const [draggedRow, setDraggedRow] = useState<number | null>(null);
   const [dragOverRow, setDragOverRow] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -186,9 +246,18 @@ export function EnhancedDataTable({
   // Column management dialog
   const [showColumnManager, setShowColumnManager] = useState(false);
   
+  // CSV Import/Export state
+  const [showCSVImportDialog, setShowCSVImportDialog] = useState(false);
+  const [showCSVMappingDialog, setShowCSVMappingDialog] = useState(false);
+  const [csvImportFile, setCSVImportFile] = useState<File | null>(null);
+  const [csvImportData, setCSVImportData] = useState<any>(null);
+  
   // Column resizing with localStorage persistence - fix hydration mismatch
   const [columnWidths, setColumnWidths] = useState<Map<number, number>>(new Map());
   const [isColumnWidthsLoaded, setIsColumnWidthsLoaded] = useState(false);
+  
+  // Selection bar state
+  const [isSelectionBarMinimized, setIsSelectionBarMinimized] = useState(false);
 
   // Load column widths after hydration
   useEffect(() => {
@@ -384,8 +453,28 @@ export function EnhancedDataTable({
 
   const getA1Ref = useCallback((rowId: number, columnId: number): string => {
     const column = columns.find(col => col.id === columnId);
-    return coordsToA1(rowId, column?.position || 1);
-  }, [columns]);
+    
+    // Find the current position of this row in the visible rows
+    // This ensures A1 references reflect the actual current position after drag & drop
+    const currentPosition = visibleRows.findIndex(row => row.id === rowId) + 1;
+    
+    // If row not found in visible rows, fall back to rowId (for backward compatibility)
+    const rowPosition = currentPosition > 0 ? currentPosition : rowId;
+    
+    const a1Ref = coordsToA1(rowPosition, column?.position || 1);
+    
+    console.log('🔍 DEBUG: getA1Ref called', {
+      rowId,
+      columnId,
+      currentPosition,
+      rowPosition,
+      a1Ref,
+      visibleRowsLength: visibleRows.length,
+      visibleRowIds: visibleRows.map(r => r.id)
+    });
+    
+    return a1Ref;
+  }, [columns, visibleRows]);
 
   const getCellKey = useCallback((rowId: number, columnId: number): string => {
     return `${rowId}-${columnId}`;
@@ -526,6 +615,58 @@ export function EnhancedDataTable({
     setEditValue('');
   }, []);
 
+  // Select cell editing handlers
+  const handleSelectCellEdit = useCallback((rowId: number, columnId: number, currentValue: string) => {
+    console.log('🎯 Starting select cell edit:', { rowId, columnId, currentValue });
+    setEditingSelectCell({ rowId, columnId });
+    setSelectEditValue(currentValue);
+  }, []);
+
+  const handleSaveSelectEdit = useCallback(async () => {
+    if (!editingSelectCell) return;
+    
+    try {
+      console.log('🚀 Saving select edit:', { editingSelectCell, selectEditValue });
+      
+      const column = columns.find(col => col.id === editingSelectCell.columnId);
+      if (!column) return;
+
+      // Add the new value to column options if it doesn't exist
+      let updatedOptions = column.options || [];
+      const trimmedValue = selectEditValue.trim();
+      
+      if (trimmedValue && !updatedOptions.includes(trimmedValue)) {
+        updatedOptions = [...updatedOptions, trimmedValue];
+        
+        // Update column with new options
+        if (onColumnUpdate) {
+          await onColumnUpdate(editingSelectCell.columnId, { options: updatedOptions });
+        }
+      }
+      
+      // Store editing info before clearing state
+      const savedEditingCell = { ...editingSelectCell };
+      const savedEditValue = trimmedValue;
+      
+      // Clear editing state
+      setEditingSelectCell(null);
+      setSelectEditValue('');
+      
+      // Save the cell value
+      await onCellUpdate(savedEditingCell.rowId, savedEditingCell.columnId, savedEditValue);
+      
+      console.log('✅ Select edit successful');
+      
+    } catch (error) {
+      console.error('❌ Error saving select cell:', error);
+    }
+  }, [editingSelectCell, selectEditValue, columns, onColumnUpdate, onCellUpdate]);
+
+  const handleCancelSelectEdit = useCallback(() => {
+    setEditingSelectCell(null);
+    setSelectEditValue('');
+  }, []);
+
   // Formula submission
   const handleFormulaSubmit = useCallback(async (formula: string) => {
     if (!focusedCell) return;
@@ -546,15 +687,130 @@ export function EnhancedDataTable({
     // Reset any temporary states
   }, []);
 
-  // Range selection with formula insertion
+  // Context menu handlers
+  const handleCellContextMenu = useCallback((e: React.MouseEvent, rowId: number, columnId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Focus the cell for context operations
+    handleCellFocus(rowId, columnId);
+    
+    setCellContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      rowId,
+      columnId
+    });
+    
+    console.log('🖱️ Cell context menu opened:', { rowId, columnId });
+  }, [handleCellFocus]);
+
+  const handleColumnContextMenu = useCallback((e: React.MouseEvent, columnId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Select the entire column
+    setSelectedColumns(new Set([columnId]));
+    setSelectedRows(new Set());
+    setSelectedRange(null);
+    setFocusedCell(null);
+    
+    setColumnContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      columnId
+    });
+    
+    console.log('🖱️ Column context menu opened:', { columnId });
+  }, []);
+
+  // Column selection handlers
+  const handleColumnSelect = useCallback((columnId: number, mode: 'single' | 'toggle' | 'range' = 'single') => {
+    console.log('🖱️ Column selection:', { columnId, mode });
+    
+    const newSelection = new Set(selectedColumns);
+    
+    if (mode === 'toggle') {
+      if (newSelection.has(columnId)) {
+        newSelection.delete(columnId);
+      } else {
+        newSelection.add(columnId);
+      }
+    } else if (mode === 'range' && selectedColumns.size > 0) {
+      // Range selection for columns
+      const lastSelected = Array.from(selectedColumns)[selectedColumns.size - 1];
+      const currentIndex = visibleColumns.findIndex(col => col.id === columnId);
+      const lastIndex = visibleColumns.findIndex(col => col.id === lastSelected);
+      
+      const startIndex = Math.min(currentIndex, lastIndex);
+      const endIndex = Math.max(currentIndex, lastIndex);
+      
+      // Add range to existing selection
+      for (let i = startIndex; i <= endIndex; i++) {
+        if (visibleColumns[i]) {
+          newSelection.add(visibleColumns[i].id);
+        }
+      }
+    } else {
+      // Single select mode
+      newSelection.clear();
+      newSelection.add(columnId);
+    }
+    
+    setSelectedColumns(newSelection);
+    // Clear other selections when selecting columns
+    setSelectedRows(new Set());
+    setSelectedRange(null);
+    setFocusedCell(null);
+    
+    console.log('🔄 Column selection updated:', Array.from(newSelection));
+  }, [selectedColumns, visibleColumns]);
+
+  // Multi-cell selection and range selection with formula insertion
   const handleCellMouseDown = useCallback((rowId: number, columnId: number, event: React.MouseEvent) => {
-    // Only enable range selection if we're editing a formula
+    console.log('🖱️ Mouse down on cell:', { rowId, columnId, buttons: event.buttons });
+    
     const isEditingFormula = focusedCell && event.shiftKey;
+    const isMultiSelection = !event.shiftKey && !event.ctrlKey && !event.metaKey;
     
     if (isEditingFormula) {
+      // Formula range selection
+      console.log('📐 Starting formula range selection');
       const column = columns.find(col => col.id === columnId);
       if (column) {
+        // 🔧 FIXED: Use visual position for formula range selection
+        const visualPosition = visibleRows.findIndex(r => r.id === rowId) + 1;
         setSelectedRange({
+          startRow: visualPosition,
+          startCol: column.position,
+          endRow: visualPosition,
+          endCol: column.position,
+        });
+      }
+    } else if (isMultiSelection) {
+      // Clear any existing selections first
+      console.log('🧹 Clearing existing selections before drag-to-select');
+      setSelectedRange(null);
+      setFocusedCell(null);
+      setCopiedCells(null);
+      
+      // Multi-cell selection - start drag-to-select
+      console.log('🎯 Starting new drag-to-select operation');
+      event.preventDefault();
+      setIsSelectingCells(true);
+      setCellSelectionStart({ rowId, columnId });
+      
+      const column = columns.find(col => col.id === columnId);
+      if (column) {
+        // 🔧 FIXED: Use visual position for drag-to-select initial range
+        const visualPosition = visibleRows.findIndex(r => r.id === rowId) + 1;
+        setSelectedRange({
+          startRow: visualPosition,
+          startCol: column.position,
+          endRow: visualPosition,
+          endCol: column.position,
+        });
+        console.log('🎯 Initial selection range set:', {
           startRow: rowId,
           startCol: column.position,
           endRow: rowId,
@@ -565,33 +821,313 @@ export function EnhancedDataTable({
   }, [columns, focusedCell]);
 
   const handleCellMouseEnter = useCallback((rowId: number, columnId: number) => {
-    if (selectedRange) {
+    // Only extend selection if we are actively selecting (drag operation in progress)
+    if (isSelectingCells && selectedRange) {
       const column = columns.find(col => col.id === columnId);
       if (column) {
+        console.log('🖱️ Extending selection to:', { rowId, columnId: column.position });
+        // 🔧 FIXED: Use visual position for extending selection during drag
+        const visualPosition = visibleRows.findIndex(r => r.id === rowId) + 1;
         setSelectedRange(prev => prev ? {
           ...prev,
-          endRow: rowId,
+          endRow: visualPosition,
           endCol: column.position,
         } : null);
       }
     }
-  }, [selectedRange, columns]);
+  }, [isSelectingCells, selectedRange, columns]);
 
   const handleCellMouseUp = useCallback(() => {
-    if (selectedRange && (
+    console.log('🖱️ Mouse up - ending selection', { isSelectingCells, hasSelectedRange: !!selectedRange });
+    
+    if (isSelectingCells) {
+      // End the drag-to-select session immediately
+      setIsSelectingCells(false);
+      setCellSelectionStart(null);
+      console.log('🖱️ Drag-to-select completed, selection finalized');
+      
+      // Clear focus to avoid interference
+      setFocusedCell(null);
+    }
+    
+    // For formula range selection with shift key
+    if (selectedRange && focusedCell && (
       selectedRange.startRow !== selectedRange.endRow ||
       selectedRange.startCol !== selectedRange.endCol
     )) {
-      // Generate range string
-      const startA1 = coordsToA1(selectedRange.startRow, selectedRange.startCol);
-      const endA1 = coordsToA1(selectedRange.endRow, selectedRange.endCol);
+      // Check if this is formula editing (has shift key context)
+      const startA1 = coordsToA1(selectedRange.startCol, selectedRange.startRow);
+      const endA1 = coordsToA1(selectedRange.endCol, selectedRange.endRow);
       const rangeString = startA1 === endA1 ? startA1 : `${startA1}:${endA1}`;
       
-      // Insert range into current formula via callback
-      handleCellRangeSelect(rangeString);
+      // Only insert into formula if we have the formula bar callback
+      if (formulaBarInsertRange) {
+        formulaBarInsertRange(rangeString);
+        setSelectedRange(null);
+      }
     }
-    setSelectedRange(null);
-  }, [selectedRange]);
+  }, [isSelectingCells, selectedRange, focusedCell, formulaBarInsertRange]);
+
+  // Clear cell selection when clicking outside
+  const handleClearCellSelection = useCallback(() => {
+    if (!isSelectingCells) {
+      setSelectedRange(null);
+    }
+  }, [isSelectingCells]);
+
+  // Copy & Paste functionality
+  const handleCopy = useCallback(async (isCut = false) => {
+    if (!selectedRange && selectedRows.size === 0 && selectedColumns.size === 0) {
+      console.log('🔄 No range, rows, or columns selected for copy');
+      return;
+    }
+
+    try {
+      console.log('📋 Starting copy operation:', { selectedRange, selectedRows: Array.from(selectedRows), selectedColumns: Array.from(selectedColumns), isCut });
+      
+      const data: Array<Array<{ value: any; formula?: string }>> = [];
+      let actualStartRow: number, actualEndRow: number, actualStartCol: number, actualEndCol: number;
+      
+      if (selectedColumns.size > 0) {
+        // Column selection - get ALL rows for selected columns using visual indices
+        const selectedColumnIds = Array.from(selectedColumns);
+        const columnIndices = selectedColumnIds
+          .map(colId => visibleColumns.findIndex(c => c.id === colId))
+          .filter(idx => idx !== -1)
+          .sort((a, b) => a - b);
+        
+        actualStartRow = 1;
+        actualEndRow = visibleRows.length;
+        actualStartCol = Math.min(...columnIndices) + 1; // +1 for 1-based indexing
+        actualEndCol = Math.max(...columnIndices) + 1;
+        
+        // 🔧 FIXED: Use visual column indices instead of column.position
+        for (let visualRow = actualStartRow; visualRow <= actualEndRow; visualRow++) {
+          const rowData: Array<{ value: any; formula?: string }> = [];
+          
+          for (const colIndex of columnIndices) {
+            const column = visibleColumns[colIndex];
+            if (column) {
+              // Convert visual row position to actual rowId
+              const rowId = visibleRows[visualRow - 1]?.id;
+              const cell = rowId ? getCellValue(rowId, column.id) : undefined;
+              rowData.push({
+                value: cell?.value || '',
+                formula: cell?.formula
+              });
+            }
+          }
+          data.push(rowData);
+        }
+        
+        console.log('📋 Column selection - visual indices:', { columnIndices, rowCount: actualEndRow - actualStartRow + 1 });
+        
+      } else if (selectedRows.size > 0 && !selectedRange) {
+        // 🐛 FIXED: Row selection - use visual column indices
+        const rowIds = Array.from(selectedRows).sort((a, b) => a - b);
+        actualStartCol = 1; // First visual column
+        actualEndCol = visibleColumns.length; // Last visual column
+        
+        // Collect data ONLY for actually selected rows using all visible columns
+        for (const rowId of rowIds) {
+          const rowData: Array<{ value: any; formula?: string }> = [];
+          
+          for (let colIndex = 0; colIndex < visibleColumns.length; colIndex++) {
+            const column = visibleColumns[colIndex];
+            const cell = getCellValue(rowId, column.id);
+            rowData.push({
+              value: cell?.value || '',
+              formula: cell?.formula
+            });
+          }
+          data.push(rowData);
+        }
+        
+        // Set range to encompass only actually selected rows for visual feedback
+        actualStartRow = Math.min(...rowIds);
+        actualEndRow = Math.max(...rowIds);
+        
+        console.log('📋 Row selection - visual columns:', { selectedRowIds: rowIds, actualRows: data.length, totalCols: visibleColumns.length });
+        
+      } else if (selectedRange) {
+        // 🔧 FIXED: Cell range selection using visual column indices
+        const { startRow, endRow, startCol, endCol } = selectedRange;
+        actualStartRow = Math.min(startRow, endRow);
+        actualEndRow = Math.max(startRow, endRow);
+        
+        // Convert column positions to visual indices
+        const startColIndex = Math.min(startCol, endCol) - 1; // Convert to 0-based
+        const endColIndex = Math.max(startCol, endCol) - 1;
+        actualStartCol = startColIndex + 1; // Store as 1-based for consistency
+        actualEndCol = endColIndex + 1;
+        
+        // Collect data from selected range using visual column indices
+        for (let visualRow = actualStartRow; visualRow <= actualEndRow; visualRow++) {
+          const rowData: Array<{ value: any; formula?: string }> = [];
+          
+          for (let colIndex = startColIndex; colIndex <= endColIndex; colIndex++) {
+            const column = visibleColumns[colIndex];
+            if (column) {
+              // Convert visual row position to actual rowId
+              const rowId = visibleRows[visualRow - 1]?.id;
+              const cell = rowId ? getCellValue(rowId, column.id) : undefined;
+              rowData.push({
+                value: cell?.value || '',
+                formula: cell?.formula
+              });
+            } else {
+              rowData.push({ value: '' });
+            }
+          }
+          data.push(rowData);
+        }
+        
+        console.log('📋 Cell range selection - visual indices:', {
+          actualStartRow, actualEndRow,
+          startColIndex, endColIndex,
+          actualStartCol, actualEndCol,
+          visibleColumnsCount: visibleColumns.length
+        });
+      } else {
+        console.log('❌ No valid selection found');
+        return;
+      }
+      
+      // Store copied data with selection type information
+      setCopiedCells({
+        data,
+        range: { startRow: actualStartRow, startCol: actualStartCol, endRow: actualEndRow, endCol: actualEndCol },
+        isCut,
+        selectionType: selectedColumns.size > 0 ? 'columns' : (selectedRows.size > 0 ? 'rows' : 'range'),
+        selectedRowIds: selectedRows.size > 0 ? Array.from(selectedRows) : undefined,
+        selectedColumnIds: selectedColumns.size > 0 ? Array.from(selectedColumns) : undefined
+      });
+      
+      // Create clipboard text (tab-separated values)
+      const clipboardText = data
+        .map(row => row.map(cell => cell.value?.toString() || '').join('\t'))
+        .join('\n');
+      
+      // Copy to system clipboard
+      await navigator.clipboard.writeText(clipboardText);
+      
+      console.log(`✅ ${isCut ? 'Cut' : 'Copy'} successful:`, {
+        dataRows: data.length,
+        dataCols: data[0]?.length || 0,
+        selectionType: selectedColumns.size > 0 ? 'columns' : (selectedRows.size > 0 ? 'rows' : 'range'),
+        clipboardText: clipboardText.substring(0, 100) + '...'
+      });
+      
+    } catch (error) {
+      console.error(`❌ ${isCut ? 'Cut' : 'Copy'} failed:`, error);
+    }
+  }, [selectedRange, selectedRows, selectedColumns, visibleColumns, visibleRows, getCellValue]);
+
+  // Cut functionality
+  const handleCut = useCallback(async () => {
+    await handleCopy(true);
+    console.log('✂️ Cut operation completed - data copied with cut flag');
+  }, [handleCopy]);
+
+  const handlePaste = useCallback(async () => {
+    if (!focusedCell) {
+      console.log('🔄 No cell focused for paste');
+      return;
+    }
+
+    try {
+      console.log('📋 Starting paste operation at:', focusedCell);
+      
+      // Try to get data from system clipboard first
+      let pasteData: string[][] = [];
+      
+      try {
+        const clipboardText = await navigator.clipboard.readText();
+        console.log('📄 Clipboard content:', clipboardText.substring(0, 100) + '...');
+        
+        // Parse tab-separated values
+        pasteData = clipboardText
+          .split('\n')
+          .filter(line => line.trim() !== '')
+          .map(line => line.split('\t'));
+          
+      } catch (clipboardError) {
+        console.warn('⚠️ Clipboard read failed, using internal copy data:', clipboardError);
+        
+        // Fallback to internal copied data
+        if (copiedCells) {
+          pasteData = copiedCells.data.map(row => row.map(cell => cell.value?.toString() || ''));
+        } else {
+          console.log('❌ No data available to paste');
+          return;
+        }
+      }
+      
+      if (pasteData.length === 0) {
+        console.log('❌ No paste data available');
+        return;
+      }
+      
+      console.log('📊 Paste data dimensions:', `${pasteData.length}x${pasteData[0]?.length || 0}`);
+      
+      // Find the starting position
+      const startRowIndex = visibleRows.findIndex(row => row.id === focusedCell.rowId);
+      const startColumn = visibleColumns.find(col => col.id === focusedCell.columnId);
+      
+      if (startRowIndex === -1 || !startColumn) {
+        console.error('❌ Could not find start position for paste');
+        return;
+      }
+      
+      const startColIndex = visibleColumns.indexOf(startColumn);
+      let updateCount = 0;
+      
+      // Apply paste data
+      for (let rowOffset = 0; rowOffset < pasteData.length; rowOffset++) {
+        const targetRowIndex = startRowIndex + rowOffset;
+        
+        if (targetRowIndex >= visibleRows.length) {
+          console.warn('⚠️ Paste extends beyond available rows');
+          break;
+        }
+        
+        const targetRow = visibleRows[targetRowIndex];
+        const rowData = pasteData[rowOffset];
+        
+        for (let colOffset = 0; colOffset < rowData.length; colOffset++) {
+          const targetColIndex = startColIndex + colOffset;
+          
+          if (targetColIndex >= visibleColumns.length) {
+            console.warn('⚠️ Paste extends beyond available columns');
+            break;
+          }
+          
+          const targetColumn = visibleColumns[targetColIndex];
+          const value = rowData[colOffset];
+          
+          // Skip computed columns
+          if (targetColumn.isComputed) {
+            console.log('⏩ Skipping computed column:', targetColumn.name);
+            continue;
+          }
+          
+          try {
+            await onCellUpdate(targetRow.id, targetColumn.id, value);
+            updateCount++;
+            console.log(`✅ Updated cell [${targetRow.id}, ${targetColumn.id}] = "${value}"`);
+          } catch (updateError) {
+            console.error(`❌ Failed to update cell [${targetRow.id}, ${targetColumn.id}]:`, updateError);
+          }
+        }
+      }
+      
+      console.log(`✅ Paste completed: ${updateCount} cells updated`);
+      
+    } catch (error) {
+      console.error('❌ Paste failed:', error);
+    }
+  }, [focusedCell, visibleRows, visibleColumns, copiedCells, onCellUpdate]);
+
 
   // Range insertion callback for FormulaBar
   const handleCellRangeSelect = useCallback((range: string) => {
@@ -606,6 +1142,108 @@ export function EnhancedDataTable({
     setFormulaBarInsertRange(() => insertFunction);
   }, []);
 
+  // Delete handlers for cell content
+  const handleDeleteCell = useCallback(async (rowId: number, columnId: number) => {
+    console.log('🗑️ Deleting cell content:', { rowId, columnId });
+    const column = visibleColumns.find(col => col.id === columnId);
+    
+    // Skip computed columns
+    if (column?.isComputed) {
+      console.log('🗑️ Skipping computed column');
+      return;
+    }
+    
+    try {
+      await onCellUpdate(rowId, columnId, ''); // Clear content
+      console.log('✅ Cell content deleted');
+    } catch (error) {
+      console.error('❌ Error deleting cell content:', error);
+    }
+  }, [visibleColumns, onCellUpdate]);
+
+  const handleDeleteRange = useCallback(async () => {
+    if (!selectedRange) return;
+    
+    console.log('🗑️ Deleting range content:', selectedRange);
+    
+    const { startRow, endRow, startCol, endCol } = selectedRange;
+    const actualStartRow = Math.min(startRow, endRow);
+    const actualEndRow = Math.max(startRow, endRow);
+    const actualStartCol = Math.min(startCol, endCol);
+    const actualEndCol = Math.max(startCol, endCol);
+    
+    let deletedCount = 0;
+    
+    // 🔧 FIXED: Convert visual positions back to rowIds for deletion
+    for (let visualRow = actualStartRow; visualRow <= actualEndRow; visualRow++) {
+      for (let col = actualStartCol; col <= actualEndCol; col++) {
+        const column = visibleColumns.find(c => c.position === col);
+        if (column && !column.isComputed) {
+          // Convert visual row position to actual rowId
+          const rowId = visibleRows[visualRow - 1]?.id;
+          if (rowId) {
+            try {
+              await onCellUpdate(rowId, column.id, '');
+              deletedCount++;
+            } catch (error) {
+              console.error(`❌ Error deleting cell [${rowId}, ${column.id}]:`, error);
+            }
+          }
+        }
+      }
+    }
+    
+    console.log(`✅ Deleted content from ${deletedCount} cells`);
+  }, [selectedRange, visibleColumns, onCellUpdate]);
+
+  const handleDeleteSelectedRows = useCallback(async () => {
+    if (selectedRows.size === 0) return;
+    
+    console.log('🗑️ Deleting content from selected rows:', Array.from(selectedRows));
+    
+    let deletedCount = 0;
+    
+    for (const rowId of selectedRows) {
+      for (const column of visibleColumns) {
+        if (!column.isComputed) {
+          try {
+            await onCellUpdate(rowId, column.id, '');
+            deletedCount++;
+          } catch (error) {
+            console.error(`❌ Error deleting cell [${rowId}, ${column.id}]:`, error);
+          }
+        }
+      }
+    }
+    
+    console.log(`✅ Deleted content from ${deletedCount} cells`);
+  }, [selectedRows, visibleColumns, onCellUpdate]);
+
+  // Delete selected columns content
+  const handleDeleteSelectedColumns = useCallback(async () => {
+    if (selectedColumns.size === 0) return;
+    
+    console.log('🗑️ Deleting content from selected columns:', Array.from(selectedColumns));
+    
+    let deletedCount = 0;
+    
+    for (const columnId of selectedColumns) {
+      const column = visibleColumns.find(col => col.id === columnId);
+      if (column && !column.isComputed) {
+        for (const row of visibleRows) {
+          try {
+            await onCellUpdate(row.id, columnId, '');
+            deletedCount++;
+          } catch (error) {
+            console.error(`❌ Error deleting cell [${row.id}, ${columnId}]:`, error);
+          }
+        }
+      }
+    }
+    
+    console.log(`✅ Deleted content from ${deletedCount} cells in columns`);
+  }, [selectedColumns, visibleColumns, visibleRows, onCellUpdate]);
+
   // Cell style helper
   const getCellClassName = useCallback((rowId: number, columnId: number) => {
     const cellKey = getCellKey(rowId, columnId);
@@ -616,65 +1254,95 @@ export function EnhancedDataTable({
     const column = columns.find(col => col.id === columnId);
     const isComputed = column?.isComputed || false;
     
+    // 🔧 FIXED: Convert rowId to visual position for correct highlighting
+    const currentRowVisualPosition = visibleRows.findIndex(r => r.id === rowId) + 1;
+    
+    // Check if cell is in selected range using visual positions
+    const isInSelectedRange = selectedRange && column && currentRowVisualPosition > 0 ? (
+      currentRowVisualPosition >= Math.min(selectedRange.startRow, selectedRange.endRow) &&
+      currentRowVisualPosition <= Math.max(selectedRange.startRow, selectedRange.endRow) &&
+      column.position >= Math.min(selectedRange.startCol, selectedRange.endCol) &&
+      column.position <= Math.max(selectedRange.startCol, selectedRange.endCol)
+    ) : false;
+
+    // Check if cell is in copied range (for visual feedback) - this uses rowIds directly
+    const isInCopiedRange = copiedCells && column ? (
+      rowId >= copiedCells.range.startRow &&
+      rowId <= copiedCells.range.endRow &&
+      column.position >= copiedCells.range.startCol &&
+      column.position <= copiedCells.range.endCol
+    ) : false;
+
+    // Check if cell is in selected column
+    const isInSelectedColumn = selectedColumns.has(columnId);
+    
     return cn(
-      "rounded px-2 py-1 min-h-[32px] flex items-center relative",
+      "px-2 py-1 min-h-[32px] flex items-center relative",
       {
-        "cursor-pointer hover:bg-accent": !isComputed,
-        "cursor-default bg-gray-50": isComputed,
-        "bg-blue-50 border-blue-200 border": isFocused,
-        "bg-green-50 border-green-200 border": isHighlighted,
-        "bg-orange-50 border-orange-200 border": isDependent,
-        "bg-accent": isEditing && !isComputed,
+        "cursor-pointer": !isComputed,
+        "cursor-default bg-gray-100": isComputed,
+        "bg-blue-100 ring-2 ring-blue-400": isFocused && !isEditing && !isInSelectedRange && !isInSelectedColumn,
+        "hover:bg-gray-50": !isComputed && !isFocused && !isEditing && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn,
+        "bg-green-50": isHighlighted && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn,
+        "bg-orange-50": isDependent && !isInSelectedRange && !isInCopiedRange && !isInSelectedColumn,
+        "bg-white ring-2 ring-blue-500": isEditing && !isComputed,
+        "bg-purple-100 ring-1 ring-purple-300": isInSelectedRange && !isEditing,
+        "bg-yellow-50 ring-1 ring-yellow-300 ring-dashed": isInCopiedRange && !isInSelectedRange && !isEditing && !copiedCells?.isCut,
+        "bg-red-50 ring-1 ring-red-300 ring-dashed": isInCopiedRange && !isInSelectedRange && !isEditing && copiedCells?.isCut,
+        "bg-blue-50 ring-1 ring-blue-200": isInSelectedColumn && !isEditing && !isInSelectedRange,
       }
     );
-  }, [focusedCell, editingCell, highlightedCells, dependentCells, getCellKey, columns]);
+  }, [focusedCell, editingCell, highlightedCells, dependentCells, getCellKey, columns, selectedRange, copiedCells]);
 
   // Row selection handlers - fixed for proper individual and multi-selection
   const handleRowSelect = useCallback((rowId: number, mode: 'single' | 'toggle' | 'range' = 'single') => {
     console.log('🖱️ Row selection:', { rowId, mode, currentSelection: Array.from(selectedRows) });
     
-    setSelectedRows(prev => {
-      const newSelection = new Set(prev);
-      
-      if (mode === 'toggle') {
-        // Toggle mode - add/remove individual row from selection (checkbox behavior)
-        if (newSelection.has(rowId)) {
-          newSelection.delete(rowId);
-        } else {
-          newSelection.add(rowId);
-        }
-      } else if (mode === 'range' && prev.size > 0) {
-        // Range selection - select from last selected to this row
-        const allRowIds = visibleRows.map(row => row.id);
-        const lastSelected = Array.from(prev)[prev.size - 1];
-        const currentIndex = allRowIds.indexOf(rowId);
-        const lastIndex = allRowIds.indexOf(lastSelected);
-        
-        const startIndex = Math.min(currentIndex, lastIndex);
-        const endIndex = Math.max(currentIndex, lastIndex);
-        
-        // Add range to existing selection
-        for (let i = startIndex; i <= endIndex; i++) {
-          newSelection.add(allRowIds[i]);
-        }
+    const newSelection = new Set(selectedRows);
+    
+    if (mode === 'toggle') {
+      // Toggle mode - add/remove individual row from selection (checkbox behavior)
+      if (newSelection.has(rowId)) {
+        newSelection.delete(rowId);
       } else {
-        // Single select mode - clear all and select only this row
-        newSelection.clear();
         newSelection.add(rowId);
       }
+    } else if (mode === 'range' && selectedRows.size > 0) {
+      // Range selection - select from last selected to this row
+      const allRowIds = visibleRows.map(row => row.id);
+      const lastSelected = Array.from(selectedRows)[selectedRows.size - 1];
+      const currentIndex = allRowIds.indexOf(rowId);
+      const lastIndex = allRowIds.indexOf(lastSelected);
       
-      console.log('🔄 New selection:', Array.from(newSelection));
-      return newSelection;
-    });
-  }, [visibleRows, selectedRows]);
+      const startIndex = Math.min(currentIndex, lastIndex);
+      const endIndex = Math.max(currentIndex, lastIndex);
+      
+      // Add range to existing selection
+      for (let i = startIndex; i <= endIndex; i++) {
+        newSelection.add(allRowIds[i]);
+      }
+    } else {
+      // Single select mode - clear all and select only this row
+      newSelection.clear();
+      newSelection.add(rowId);
+    }
+    
+    console.log('🔄 New selection:', Array.from(newSelection));
+    setSelectedRows(newSelection);
+  }, [visibleRows, selectedRows, setSelectedRows]);
 
   const handleSelectAll = useCallback(() => {
-    if (selectedRows.size === visibleRows.length) {
+    const allSelected = selectedRows.size === visibleRows.length && visibleRows.length > 0;
+    
+    if (allSelected) {
+      // Deselect all rows
       setSelectedRows(new Set());
     } else {
-      setSelectedRows(new Set(visibleRows.map(row => row.id)));
+      // Select all visible rows
+      const allRowIds = visibleRows.map(row => row.id);
+      setSelectedRows(new Set(allRowIds));
     }
-  }, [selectedRows.size, visibleRows]);
+  }, [selectedRows, visibleRows, setSelectedRows]);
 
   // Drag & Drop handlers
   const handleDragStart = useCallback((e: React.DragEvent, rowId: number) => {
@@ -711,28 +1379,65 @@ export function EnhancedDataTable({
     setDragOverRow(null);
   }, []);
 
-  const handleDrop = useCallback((e: React.DragEvent, targetRowId: number) => {
+  const handleDrop = useCallback(async (e: React.DragEvent, targetRowId: number) => {
     e.preventDefault();
     const sourceRowId = parseInt(e.dataTransfer.getData('text/plain'), 10);
     
     if (sourceRowId === targetRowId) return;
+
+    console.log('🔄 DEBUG: Row drop started', { sourceRowId, targetRowId });
 
     // Reorder rows
     const newRows = [...rows];
     const sourceIndex = newRows.findIndex(row => row.id === sourceRowId);
     const targetIndex = newRows.findIndex(row => row.id === targetRowId);
     
+    console.log('🔄 DEBUG: Row indices', { sourceIndex, targetIndex });
+    console.log('🔄 DEBUG: Row order before move', newRows.map((r, i) => ({ index: i, id: r.id })));
+    
     if (sourceIndex !== -1 && targetIndex !== -1) {
       const [movedRow] = newRows.splice(sourceIndex, 1);
       newRows.splice(targetIndex, 0, movedRow);
       
+      console.log('🔄 DEBUG: Row order after move', newRows.map((r, i) => ({ index: i, id: r.id })));
+      console.log('🔄 DEBUG: A1 references after move:', newRows.map((r, i) => ({
+        id: r.id,
+        visualPos: i + 1,
+        a1Ref: getA1Ref(r.id, columns[0]?.id || 1)
+      })));
+      
+      // Update UI immediately
       onRowsUpdate?.(newRows);
+
+      // Update formula engine with new row order via API
+      try {
+        const newRowOrder = newRows.map(row => row.id);
+        console.log('🔄 DEBUG: Sending new row order to API:', newRowOrder);
+        
+        const response = await fetch(`/api/tables/${tableId}/rows`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            rowOrder: newRowOrder,
+          }),
+        });
+
+        if (!response.ok) {
+          console.error('Failed to update row order in formula engine:', response.statusText);
+        } else {
+          console.log('✅ Formula engine updated with new row order');
+        }
+      } catch (error) {
+        console.error('Error updating formula engine row order:', error);
+      }
     }
     
     setDragOverRow(null);
     setDraggedRow(null);
     setIsDragging(false);
-  }, [rows, onRowsUpdate]);
+  }, [rows, onRowsUpdate, tableId, getA1Ref, columns]);
 
   // Row styling helper
   const getRowClassName = useCallback((rowId: number) => {
@@ -901,17 +1606,229 @@ export function EnhancedDataTable({
     }
   }, [onRowUnhide]);
 
+  // CSV Import/Export handlers
+  const handleCSVImport = useCallback(() => {
+    setShowCSVImportDialog(true);
+  }, []);
+
+  const handleCSVExport = useCallback(async (includeFormulas = false) => {
+    if (!onCSVExport) return;
+    
+    try {
+      await onCSVExport({ includeFormulas });
+    } catch (error) {
+      console.error('Error exporting CSV:', error);
+    }
+  }, [onCSVExport]);
+
+  const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file && file.type === 'text/csv') {
+      setCSVImportFile(file);
+      setShowCSVImportDialog(false);
+      setShowCSVMappingDialog(true);
+    }
+  }, []);
+
+  const handleImportConfirm = useCallback(async () => {
+    if (!csvImportFile || !onCSVImport) return;
+    
+    try {
+      // Simple import without mapping
+      await onCSVImport(csvImportFile);
+      setShowCSVImportDialog(false);
+      setCSVImportFile(null);
+      setCSVImportData(null);
+    } catch (error) {
+      console.error('Error importing CSV:', error);
+    }
+  }, [csvImportFile, onCSVImport]);
+
+  const handleMappingConfirm = useCallback(async (mappings: any[], createMissingColumns: boolean) => {
+    if (!csvImportFile || !onCSVImport) return;
+    
+    try {
+      // Import with column mappings
+      await onCSVImport(csvImportFile, { mappings, createMissingColumns });
+      setShowCSVMappingDialog(false);
+      setCSVImportFile(null);
+      setCSVImportData(null);
+    } catch (error) {
+      console.error('Error importing CSV with mappings:', error);
+    }
+  }, [csvImportFile, onCSVImport]);
+
+  const handleMappingCancel = useCallback(() => {
+    setShowCSVMappingDialog(false);
+    setCSVImportFile(null);
+    setCSVImportData(null);
+  }, []);
+
   // Close context menu when clicking elsewhere
   useEffect(() => {
     const handleClickOutside = () => {
       setContextMenu(null);
+      setCellContextMenu(null);
+      setColumnContextMenu(null);
     };
 
-    if (contextMenu) {
+    if (contextMenu || cellContextMenu || columnContextMenu) {
       document.addEventListener('click', handleClickOutside);
       return () => document.removeEventListener('click', handleClickOutside);
     }
-  }, [contextMenu]);
+  }, [contextMenu, cellContextMenu, columnContextMenu]);
+
+  // Global keyboard event handlers for Copy & Paste
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const tableContainer = document.querySelector('[data-table-container]');
+      const isTableFocused = tableContainer && (
+        tableContainer.contains(document.activeElement) ||
+        focusedCell ||
+        selectedRange ||
+        selectedRows.size > 0
+      );
+
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      const ctrlKey = isMac ? event.metaKey : event.ctrlKey;
+
+      console.log('⌨️ Key:', event.key, 'Ctrl:', ctrlKey, 'Focus:', !!focusedCell, 'Range:', !!selectedRange, 'Rows:', selectedRows.size);
+
+      // More lenient focus check - handle copy/paste if we have any table interaction
+      if (!isTableFocused && !focusedCell && selectedRows.size === 0) {
+        console.log('⌨️ Not handling - no interaction');
+        return;
+      }
+
+      // Copy (Ctrl+C / Cmd+C)
+      if (ctrlKey && event.key.toLowerCase() === 'c') {
+        console.log('📋 COPY shortcut detected!');
+        event.preventDefault();
+        
+        // Priority: selected range > focused cell > selected rows
+        if (selectedRange) {
+          console.log('📋 Copying selected range');
+          handleCopy();
+        }
+        else if (focusedCell) {
+          console.log('📋 Creating single-cell selection for focused cell');
+          const column = visibleColumns.find(col => col.id === focusedCell.columnId);
+          if (column) {
+            const singleCellRange = {
+              startRow: focusedCell.rowId,
+              endRow: focusedCell.rowId,
+              startCol: column.position,
+              endCol: column.position
+            };
+            console.log('📋 Single cell range created');
+            setSelectedRange(singleCellRange);
+            
+            // Copy after a brief delay to ensure state is updated
+            setTimeout(() => {
+              handleCopy();
+            }, 10);
+          }
+        }
+        else if (selectedRows.size > 0) {
+          console.log('📋 Copying selected rows - creating range');
+          // Copy entire selected rows
+          const firstRowId = Array.from(selectedRows)[0];
+          const lastRowId = Array.from(selectedRows)[selectedRows.size - 1];
+          const firstCol = visibleColumns[0]?.position || 1;
+          const lastCol = visibleColumns[visibleColumns.length - 1]?.position || 1;
+          
+          const rowRange = {
+            startRow: Math.min(firstRowId, lastRowId),
+            endRow: Math.max(firstRowId, lastRowId),
+            startCol: firstCol,
+            endCol: lastCol
+          };
+          
+          setSelectedRange(rowRange);
+          setTimeout(() => {
+            handleCopy();
+          }, 10);
+        }
+        else {
+          console.log('📋 Nothing to copy');
+        }
+      }
+
+      // Paste (Ctrl+V / Cmd+V)
+      else if (ctrlKey && event.key.toLowerCase() === 'v') {
+        console.log('📋 PASTE shortcut detected!');
+        event.preventDefault();
+        if (focusedCell) {
+          console.log('📋 Pasting to focused cell');
+          handlePaste();
+        } else {
+          console.log('📋 No focused cell for paste');
+        }
+      }
+
+      // Delete/Backspace to clear cell content
+      else if ((event.key === 'Delete' || event.key === 'Backspace')) {
+        console.log('🗑️ DELETE shortcut detected!');
+        event.preventDefault();
+        
+        // Priority: selected range > focused cell > selected rows
+        if (selectedRange) {
+          console.log('🗑️ Deleting content in selected range');
+          handleDeleteRange();
+        }
+        else if (focusedCell) {
+          console.log('🗑️ Deleting content in focused cell');
+          handleDeleteCell(focusedCell.rowId, focusedCell.columnId);
+        }
+        else if (selectedRows.size > 0) {
+          console.log('🗑️ Deleting content in selected rows');
+          handleDeleteSelectedRows();
+        }
+        else if (selectedColumns.size > 0) {
+          console.log('🗑️ Deleting content in selected columns');
+          handleDeleteSelectedColumns();
+        }
+        else {
+          console.log('🗑️ Nothing selected to delete');
+        }
+      }
+
+      // Escape to clear selection
+      else if (event.key === 'Escape') {
+        console.log('🔄 Escape - clearing all selections');
+        setSelectedRange(null);
+        setCopiedCells(null);
+        setFocusedCell(null);
+        setSelectedColumns(new Set());
+        setCellContextMenu(null);
+        setColumnContextMenu(null);
+      }
+    };
+
+    console.log('📋 Keyboard handlers registered');
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      console.log('📋 Keyboard handlers unregistered');
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [focusedCell, selectedRange, selectedRows.size, visibleColumns, handleCopy, handlePaste, handleDeleteRange, handleDeleteCell, handleDeleteSelectedRows]);
+
+  // Clear cell selection when clicking outside the table
+  useEffect(() => {
+    const handleDocumentClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      const tableContainer = document.querySelector('[data-table-container]');
+      
+      if (tableContainer && !tableContainer.contains(target)) {
+        handleClearCellSelection();
+      }
+    };
+
+    if (selectedRange && !isSelectingCells) {
+      document.addEventListener('click', handleDocumentClick);
+      return () => document.removeEventListener('click', handleDocumentClick);
+    }
+  }, [selectedRange, isSelectingCells, handleClearCellSelection]);
 
   // Column resizing handlers
   const handleResizeStart = useCallback((e: React.MouseEvent, columnId: number) => {
@@ -1339,13 +2256,13 @@ export function EnhancedDataTable({
   return (
     <TooltipProvider>
       <div className="space-y-0">
-        {/* Formel-Leiste */}
-        <FormulaBar
-          focusedCell={focusedCell}
-          columns={columns}
-          onFormulaSubmit={handleFormulaSubmit}
-          onFormulaCancel={handleFormulaCancel}
-          onRegisterRangeInserter={handleFormulaBarRangeCallback}
+        {/* CSV Import/Export Buttons - Hidden file input */}
+        <input
+          type="file"
+          accept=".csv"
+          onChange={handleFileSelect}
+          className="hidden"
+          id="csv-file-input"
         />
 
         {/* Active Filters Bar */}
@@ -1368,15 +2285,26 @@ export function EnhancedDataTable({
           </div>
         )}
 
-        {/* Tabelle */}
-        <Card>
+        {/* Tabelle mit integrierter Formel-Leiste */}
+        <Card className="rounded-lg overflow-hidden">
           <CardContent className="p-0">
-            <div className="overflow-x-auto relative">
-              <Table>
+            {/* Integrierte Formel-Leiste */}
+            <div className="border-b border-gray-300 bg-gray-50">
+              <FormulaBar
+                focusedCell={focusedCell}
+                columns={columns}
+                onFormulaSubmit={handleFormulaSubmit}
+                onFormulaCancel={handleFormulaCancel}
+                onRegisterRangeInserter={handleFormulaBarRangeCallback}
+              />
+            </div>
+            
+            <div className="overflow-x-auto relative" data-table-container>
+              <Table className="border-collapse w-full">
                 <TableHeader>
-                  <TableRow>
+                  <TableRow className="border-b border-gray-300">
                     {/* ID Column with improved multi-selection */}
-                    <TableHead className="w-12 group relative">
+                    <TableHead className="w-12 group relative border-r border-gray-300 bg-gray-50">
                       <div className="flex items-center justify-center">
                         <span className={cn(
                           "text-sm font-medium transition-opacity",
@@ -1398,61 +2326,71 @@ export function EnhancedDataTable({
                     {visibleColumns.map((column, index) => (
                       <TableHead
                         key={column.id}
-                        className="font-semibold border-r border-gray-200 relative"
+                        className="font-semibold border-r border-gray-300 relative group bg-gray-50"
                         style={{
                           width: `${getColumnWidth(column.id)}px`,
                           minWidth: '80px',
                           maxWidth: `${getColumnWidth(column.id)}px`
                         }}
                       >
-                        <div className="flex items-center justify-between pr-2">
+                        <div className="flex items-center justify-between pr-2 relative">
                           <div className="flex items-center space-x-2 flex-1 min-w-0">
-                            <span className="truncate font-medium">{column.name}</span>
-                            {columnFilters.has(column.id) && (
-                              <div className="h-2 w-2 bg-blue-500 rounded-full shrink-0" />
-                            )}
-                            {columnSort?.columnId === column.id && (
-                              <div className="flex items-center">
-                                {columnSort.direction === 'asc' ? (
-                                  <SortAsc className="h-3 w-3 text-blue-600" />
-                                ) : (
-                                  <SortDesc className="h-3 w-3 text-blue-600" />
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          
-                          <div className="flex items-center space-x-1">
-                            <FilterButton column={column} />
-                            
-                            {/* Professional resize handle */}
-                            <button
-                              className="w-4 h-4 flex items-center justify-center cursor-col-resize text-gray-400 hover:text-gray-600 transition-colors"
-                              onMouseDown={(e) => {
-                                console.log('🖱️ Resize handle clicked for column', column.id);
-                                e.preventDefault();
-                                e.stopPropagation();
-                                handleResizeStart(e, column.id);
-                              }}
-                              title={`Spaltenbreite für ${column.name} ändern`}
-                            >
-                              <svg
-                                width="12"
-                                height="12"
-                                viewBox="0 0 12 12"
-                                fill="currentColor"
-                                className="hover:text-blue-500 transition-colors"
-                              >
-                                <path d="M2 3h1v6H2V3zM5 3h1v6H8V3zM8 3h1v6H8V3z" />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
+                             <span
+                               className="truncate font-medium cursor-pointer hover:text-blue-600 transition-colors"
+                               onClick={(e) => {
+                                 e.stopPropagation();
+                                 if (e.shiftKey && selectedColumns.size > 0) {
+                                   handleColumnSelect(column.id, 'range');
+                                 } else if (e.ctrlKey || e.metaKey) {
+                                   handleColumnSelect(column.id, 'toggle');
+                                 } else {
+                                   handleColumnSelect(column.id, 'single');
+                                 }
+                               }}
+                               onDoubleClick={(e) => {
+                                 e.preventDefault();
+                                 e.stopPropagation();
+                                 handleEditColumn(column.id);
+                               }}
+                               onContextMenu={(e) => handleColumnContextMenu(e, column.id)}
+                               title={`Klick zum Markieren, Doppelklick zum Bearbeiten von "${column.name}"`}
+                             >
+                               {column.name}
+                             </span>
+                             {columnFilters.has(column.id) && (
+                               <div className="h-2 w-2 bg-blue-500 rounded-full shrink-0" />
+                             )}
+                             {columnSort?.columnId === column.id && (
+                               <div className="flex items-center">
+                                 {columnSort.direction === 'asc' ? (
+                                   <SortAsc className="h-3 w-3 text-blue-600" />
+                                 ) : (
+                                   <SortDesc className="h-3 w-3 text-blue-600" />
+                                 )}
+                               </div>
+                             )}
+                           </div>
+                           
+                           <div className="flex items-center space-x-1">
+                             <FilterButton column={column} />
+                           </div>
+                         </div>
+                         
+                         {/* Resize handle on the right edge */}
+                         <div
+                           className="absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-200 transition-colors opacity-0 hover:opacity-100"
+                           onMouseDown={(e) => {
+                             e.preventDefault();
+                             e.stopPropagation();
+                             handleResizeStart(e, column.id);
+                           }}
+                           title={`Spaltenbreite für ${column.name} ändern`}
+                         />
                       </TableHead>
                     ))}
                     
                     {/* Column Management and Add Column Buttons */}
-                    <TableHead className="w-24 border-r border-gray-200">
+                    <TableHead className="w-24 border-r border-gray-300 bg-gray-50">
                       <div className="flex items-center justify-center space-x-1">
                         <Button
                           variant="ghost"
@@ -1485,15 +2423,12 @@ export function EnhancedDataTable({
                       <React.Fragment key={row.id}>
                     <TableRow
                       key={row.id}
-                      className={getRowClassName(row.id)}
-                      draggable
-                      onDragStart={(e) => handleDragStart(e, row.id)}
-                      onDragEnd={handleDragEnd}
-                      onDragOver={(e) => handleDragOver(e, row.id)}
-                      onDragLeave={handleDragLeave}
-                      onDrop={(e) => handleDrop(e, row.id)}
+                      className={cn(getRowClassName(row.id), "border-b border-gray-200")}
                       onClick={(e) => {
+                        // Zeilen-Auswahl nur durch explizite Row-Area Klicks (nicht durch Zell-Klicks)
                         e.preventDefault();
+                        console.log('🖱️ Row click (should only happen via row area, not cell):', { rowId: row.id });
+                        
                         if (e.shiftKey && selectedRows.size > 0) {
                           handleRowSelect(row.id, 'range');
                         } else if (e.ctrlKey || e.metaKey) {
@@ -1516,20 +2451,20 @@ export function EnhancedDataTable({
                       }}
                     >
                       {/* ID Cell with fixed row numbers */}
-                      <TableCell className="w-12 p-2 group" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-center relative">
+                      <TableCell className="w-12 p-0 group border-r border-gray-300" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-center relative px-2 py-1" style={{ minHeight: '32px' }}>
                           <span className={cn(
-                            "text-sm text-gray-600 font-mono transition-opacity cursor-pointer",
+                            "text-sm text-gray-600 font-mono transition-opacity cursor-pointer absolute inset-0 flex items-center justify-center",
                             selectedRows.has(row.id) ? "opacity-0" : "group-hover:opacity-0"
                           )}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleRowSelect(row.id, 'toggle'); // Click number = toggle for multi-select
                           }}>
-                            {row.id}
+                            {index + 1}
                           </span>
                           <div className={cn(
-                            "flex items-center space-x-2 transition-opacity",
+                            "flex items-center space-x-2 transition-opacity absolute inset-0 justify-center",
                             selectedRows.has(row.id) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                           )}>
                             <input
@@ -1544,10 +2479,33 @@ export function EnhancedDataTable({
                               }}
                               className="rounded cursor-pointer"
                             />
-                            <GripVertical
-                              className="h-4 w-4 text-gray-400 cursor-grab active:cursor-grabbing"
+                            <div
+                              draggable
+                              onDragStart={(e) => {
+                                e.stopPropagation();
+                                handleDragStart(e, row.id);
+                              }}
+                              onDragEnd={(e) => {
+                                e.stopPropagation();
+                                handleDragEnd(e);
+                              }}
+                              onDragOver={(e) => {
+                                e.stopPropagation();
+                                handleDragOver(e, row.id);
+                              }}
+                              onDragLeave={(e) => {
+                                e.stopPropagation();
+                                handleDragLeave();
+                              }}
+                              onDrop={(e) => {
+                                e.stopPropagation();
+                                handleDrop(e, row.id);
+                              }}
                               onMouseDown={(e) => e.stopPropagation()}
-                            />
+                              className="cursor-grab active:cursor-grabbing"
+                            >
+                              <GripVertical className="h-4 w-4 text-gray-400" />
+                            </div>
                           </div>
                         </div>
                       </TableCell>
@@ -1559,7 +2517,7 @@ export function EnhancedDataTable({
                         return (
                           <TableCell
                             key={`${row.id}-${column.id}`}
-                            className="p-2 overflow-hidden"
+                            className="p-0 overflow-hidden border-r border-gray-300"
                             style={{
                               width: `${getColumnWidth(column.id)}px`,
                               minWidth: '80px',
@@ -1569,8 +2527,20 @@ export function EnhancedDataTable({
                             {isEditing ? (
                               <Input
                                 value={editValue}
-                                onChange={(e) => setEditValue(e.target.value)}
-                                className="h-8"
+                                onChange={(e) => {
+                                  const newValue = e.target.value;
+                                  console.log('📝 Inline editor changed:', newValue);
+                                  setEditValue(newValue);
+                                  
+                                  // 🔧 BUGFIX: Update focusedCell value in real-time for FormulaBar sync
+                                  if (focusedCell && focusedCell.rowId === row.id && focusedCell.columnId === column.id) {
+                                    setFocusedCell(prev => prev ? {
+                                      ...prev,
+                                      value: newValue
+                                    } : null);
+                                  }
+                                }}
+                                className="h-8 rounded-none border-0 focus:ring-2 focus:ring-blue-500 focus:ring-inset"
                                 autoFocus
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter') {
@@ -1589,16 +2559,97 @@ export function EnhancedDataTable({
                             ) : (
                               <div
                                 className={getCellClassName(row.id, column.id)}
-                                onClick={() => handleCellFocus(row.id, column.id)}
+                                onClick={(e) => {
+                                  // WICHTIG: Event-Bubbling stoppen, damit Row-Click nicht ausgelöst wird
+                                  e.stopPropagation();
+                                  console.log('🖱️ Cell click (isolated):', { rowId: row.id, columnId: column.id });
+                                  
+                                  // Enhanced cell selection with Ctrl/Shift support
+                                  if (e.shiftKey && lastSelectedCell) {
+                                    // Shift+Click: Extend selection from last selected cell to this cell
+                                    const currentColumn = visibleColumns.find(col => col.id === column.id);
+                                    const lastColumn = visibleColumns.find(col => col.id === lastSelectedCell.columnId);
+                                    
+                                    if (currentColumn && lastColumn) {
+                                      // 🔧 ENHANCED DEBUG: Use visual positions instead of rowId for range selection
+                                      const currentRowVisualPosition = visibleRows.findIndex(r => r.id === row.id) + 1;
+                                      const lastRowVisualPosition = visibleRows.findIndex(r => r.id === lastSelectedCell.rowId) + 1;
+                                      
+                                      // Calculate range using visual positions
+                                      const startRow = Math.min(currentRowVisualPosition, lastRowVisualPosition);
+                                      const endRow = Math.max(currentRowVisualPosition, lastRowVisualPosition);
+                                      const startCol = Math.min(currentColumn.position, lastColumn.position);
+                                      const endCol = Math.max(currentColumn.position, lastColumn.position);
+                                      
+                                      console.log('🎯 ENHANCED DEBUG: Shift+Click Range Selection', {
+                                        currentCell: {
+                                          rowId: row.id,
+                                          visualPos: currentRowVisualPosition,
+                                          columnId: column.id,
+                                          position: currentColumn.position
+                                        },
+                                        lastSelectedCell: {
+                                          rowId: lastSelectedCell.rowId,
+                                          visualPos: lastRowVisualPosition,
+                                          columnId: lastSelectedCell.columnId,
+                                          position: lastColumn.position
+                                        },
+                                        calculatedRange: { startRow, endRow, startCol, endCol },
+                                        visibleRowsOrder: visibleRows.map((r, i) => ({ visualPos: i + 1, id: r.id })),
+                                        expectedSelection: `Should highlight visual rows ${startRow} to ${endRow}`
+                                      });
+                                      
+                                      setSelectedRange({
+                                        startRow,
+                                        startCol,
+                                        endRow,
+                                        endCol
+                                      });
+                                      
+                                      // Clear other selections
+                                      setSelectedRows(new Set());
+                                      setSelectedColumns(new Set());
+                                      setFocusedCell(null);
+                                      
+                                      console.log('🎯 Range extended via Shift+Click:', { startRow, startCol, endRow, endCol });
+                                    }
+                                  } else if (e.ctrlKey || e.metaKey) {
+                                    // Ctrl+Click: Add to selection or start multi-selection
+                                    handleCellFocus(row.id, column.id);
+                                    setLastSelectedCell({ rowId: row.id, columnId: column.id });
+                                  } else {
+                                    // Regular cell click
+                                    console.log('🧹 Clearing copied cells visual feedback');
+                                    setCopiedCells(null);
+                                    // Only clear selectedRange if we're starting a new single-cell focus
+                                    // Don't clear during multi-cell selection process
+                                    if (!isSelectingCells) {
+                                      setSelectedRange(null);
+                                      setSelectedRows(new Set());
+                                      setSelectedColumns(new Set());
+                                    }
+                                    
+                                    // Only focus if not currently editing
+                                    if (!editingCell && !editingSelectCell) {
+                                      handleCellFocus(row.id, column.id);
+                                      setLastSelectedCell({ rowId: row.id, columnId: column.id });
+                                    }
+                                  }
+                                }}
                                 onDoubleClick={() => {
                                   // Don't allow editing computed columns
                                   if (!column.isComputed) {
                                     handleCellEdit(row.id, column.id, cell?.formula || cell?.value?.toString() || '');
                                   }
                                 }}
-                                onMouseDown={(e) => handleCellMouseDown(row.id, column.id, e)}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation(); // Prevent row selection during drag-to-select
+                                  handleCellMouseDown(row.id, column.id, e);
+                                }}
                                 onMouseEnter={() => handleCellMouseEnter(row.id, column.id)}
                                 onMouseUp={handleCellMouseUp}
+                                onContextMenu={(e) => handleCellContextMenu(e, row.id, column.id)}
+                                style={{ minHeight: '32px' }}
                               >
                                 <div className="flex items-center justify-between w-full overflow-hidden">
                                   <div className="flex items-center space-x-1 flex-1 overflow-hidden">
@@ -1610,28 +2661,111 @@ export function EnhancedDataTable({
                                     )}
                                     <span className="truncate">
                                     {column.type === 'select' ? (
-                                      <Select
-                                        value={cell?.value || ''}
-                                        onValueChange={(value) => onCellUpdate(row.id, column.id, value)}
-                                        disabled={isEditing}
-                                      >
-                                        <SelectTrigger
-                                          className="h-6 w-full border-0 bg-transparent p-0 text-xs hover:bg-accent"
-                                          onClick={(e) => e.stopPropagation()}
+                                      editingSelectCell?.rowId === row.id && editingSelectCell?.columnId === column.id ? (
+                                        // Inline editing mode for select
+                                        <Input
+                                          value={selectEditValue}
+                                          onChange={(e) => {
+                                            const newValue = e.target.value;
+                                            console.log('📝 Select editor changed:', newValue);
+                                            setSelectEditValue(newValue);
+                                            
+                                            // Sync with formula bar
+                                            if (focusedCell && focusedCell.rowId === row.id && focusedCell.columnId === column.id) {
+                                              setFocusedCell(prev => prev ? {
+                                                ...prev,
+                                                value: newValue
+                                              } : null);
+                                            }
+                                          }}
+                                          className="h-6 w-full border-0 bg-transparent p-0 text-xs focus:ring-1 focus:ring-blue-500"
+                                          placeholder="Neuen Wert eingeben..."
+                                          autoFocus
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              handleSaveSelectEdit();
+                                            } else if (e.key === 'Escape') {
+                                              e.preventDefault();
+                                              handleCancelSelectEdit();
+                                            }
+                                          }}
+                                          onBlur={() => {
+                                            // Small delay to prevent conflicts
+                                            setTimeout(handleSaveSelectEdit, 100);
+                                          }}
+                                        />
+                                      ) : (
+                                        // Normal select dropdown
+                                        <Select
+                                          value={cell?.value || ''}
+                                          onValueChange={(value) => {
+                                            console.log('🎨 Select value changed:', { value, rowId: row.id, columnId: column.id });
+                                            onCellUpdate(row.id, column.id, value);
+                                          }}
+                                          disabled={isEditing}
                                         >
-                                          <Badge
-                                            variant={cell?.value === 'Active' ? 'default' : 'secondary'}
-                                            className="text-xs"
+                                          <SelectTrigger
+                                            className="h-6 w-full border-0 bg-transparent p-0 text-xs hover:bg-accent rounded-md overflow-hidden"
+                                            onClick={(e) => {
+                                              console.log('🔍 SelectTrigger clicked - preventing row selection');
+                                              e.stopPropagation(); // Prevent row selection
+                                            }}
+                                            onDoubleClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              console.log('✏️ Double-click to edit select value');
+                                              handleSelectCellEdit(row.id, column.id, cell?.value?.toString() || '');
+                                            }}
                                           >
-                                            {cell?.value || 'Select...'}
-                                          </Badge>
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                          <SelectItem value="Active">Active</SelectItem>
-                                          <SelectItem value="Inactive">Inactive</SelectItem>
-                                          <SelectItem value="Pending">Pending</SelectItem>
-                                        </SelectContent>
-                                      </Select>
+                                            <Badge
+                                              variant={cell?.value ? 'default' : 'secondary'}
+                                              className={cn(
+                                                "text-xs rounded-md border-0 w-full h-full flex items-center justify-center",
+                                                (() => {
+                                                  if (!cell?.value) return "bg-gray-100 text-gray-600";
+                                                  
+                                                  const colorMapping = column.optionColors?.[cell.value];
+                                                  
+                                                  // Use custom color if defined
+                                                  if (colorMapping && typeof colorMapping === 'object') {
+                                                    return `${colorMapping.bg} ${colorMapping.text}`;
+                                                  }
+                                                  
+                                                  // Legacy fallback for existing data
+                                                  if (cell.value === 'Active') return "bg-green-100 text-green-800";
+                                                  if (cell.value === 'Inactive') return "bg-red-100 text-red-800";
+                                                  if (cell.value === 'Pending') return "bg-yellow-100 text-yellow-800";
+                                                  
+                                                  return "bg-gray-100 text-gray-800";
+                                                })()
+                                              )}
+                                            >
+                                              {cell?.value || 'Select...'}
+                                            </Badge>
+                                          </SelectTrigger>
+                                          <SelectContent className="rounded-md overflow-hidden">
+                                            {(column.options || ['Active', 'Inactive', 'Pending']).map((option) => (
+                                              <SelectItem key={option} value={option}>
+                                                {option}
+                                              </SelectItem>
+                                            ))}
+                                            {/* Add separator and option to add new value */}
+                                            <div className="border-t my-1"></div>
+                                            <div
+                                              className="flex items-center px-2 py-1 text-xs text-blue-600 hover:bg-accent cursor-pointer"
+                                              onClick={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                handleSelectCellEdit(row.id, column.id, '');
+                                              }}
+                                            >
+                                              <Plus className="h-3 w-3 mr-1" />
+                                              Neuen Wert hinzufügen
+                                            </div>
+                                          </SelectContent>
+                                        </Select>
+                                      )
                                     ) : (
                                       // Show pending update or actual cell value
                                       (() => {
@@ -1704,9 +2838,9 @@ export function EnhancedDataTable({
                       
                       {/* Render hidden row group indicator after this row if needed */}
                       {hiddenGroupAfterThis && (
-                        <TableRow className="h-1 hover:h-6 transition-all duration-200 group border-b-0">
+                        <TableRow className="h-1 hover:h-6 transition-all duration-200 group">
                           {/* Small indicator only in the ID column */}
-                          <TableCell className="p-0 h-1 group-hover:h-6 transition-all duration-200 w-12">
+                          <TableCell className="p-0 h-1 group-hover:h-6 transition-all duration-200 w-12 border-r border-gray-300">
                             <div
                               className="w-full h-full flex items-center justify-center cursor-pointer transition-colors"
                               onClick={() => handleUnhideRows(hiddenGroupAfterThis.rowIds)}
@@ -1727,9 +2861,9 @@ export function EnhancedDataTable({
                           
                           {/* Empty cells for other columns */}
                           {visibleColumns.map(col => (
-                            <TableCell key={col.id} className="p-0 h-1 group-hover:h-6"></TableCell>
+                            <TableCell key={col.id} className="p-0 h-1 group-hover:h-6 border-r border-gray-300"></TableCell>
                           ))}
-                          <TableCell className="p-0 h-1 group-hover:h-6 w-24"></TableCell>
+                          <TableCell className="p-0 h-1 group-hover:h-6 w-24 border-r border-gray-300"></TableCell>
                         </TableRow>
                       )}
                     </React.Fragment>
@@ -1738,8 +2872,8 @@ export function EnhancedDataTable({
 
                   {/* Handle hidden groups at the beginning (before any visible rows) */}
                   {hiddenRowGroups.length > 0 && !hiddenRowGroups[0].afterRowId && visibleRows.length > 0 && (
-                    <TableRow className="h-1 hover:h-6 transition-all duration-200 group border-b-0">
-                      <TableCell className="p-0 h-1 group-hover:h-6 transition-all duration-200 w-12">
+                    <TableRow key={`hidden-group-start-${hiddenRowGroups[0].startId}-${hiddenRowGroups[0].endId}`} className="h-1 hover:h-6 transition-all duration-200 group">
+                      <TableCell className="p-0 h-1 group-hover:h-6 transition-all duration-200 w-12 border-r border-gray-300">
                         <div
                           className="w-full h-full flex items-center justify-center cursor-pointer transition-colors"
                           onClick={() => handleUnhideRows(hiddenRowGroups[0].rowIds)}
@@ -1759,17 +2893,17 @@ export function EnhancedDataTable({
                       </TableCell>
                       
                       {visibleColumns.map(col => (
-                        <TableCell key={col.id} className="p-0 h-1 group-hover:h-6"></TableCell>
+                        <TableCell key={col.id} className="p-0 h-1 group-hover:h-6 border-r border-gray-300"></TableCell>
                       ))}
-                      <TableCell className="p-0 h-1 group-hover:h-6 w-24"></TableCell>
+                      <TableCell className="p-0 h-1 group-hover:h-6 w-24 border-r border-gray-300"></TableCell>
                     </TableRow>
                   )}
 
                   {/* Add Row */}
-                  <TableRow className="hover:bg-muted/50 border-dashed border-2 border-transparent hover:border-blue-300">
+                  <TableRow key="add-new-row" className="hover:bg-muted/50 border-dashed border-2 border-transparent hover:border-blue-300 border-t border-gray-300">
                     {/* Plus button in ID column */}
-                    <TableCell className="w-12 p-2">
-                      <div className="flex items-center justify-center">
+                    <TableCell className="w-12 p-0 border-r border-gray-300">
+                      <div className="flex items-center justify-center px-2 py-1" style={{ minHeight: '32px' }}>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -1785,21 +2919,21 @@ export function EnhancedDataTable({
                     {visibleColumns.map((column) => (
                       <TableCell
                         key={`add-row-${column.id}`}
-                        className="p-2 text-muted-foreground"
+                        className="p-0 text-muted-foreground border-r border-gray-300"
                         style={{
                           width: `${getColumnWidth(column.id)}px`,
                           minWidth: '80px',
                           maxWidth: `${getColumnWidth(column.id)}px`
                         }}
                       >
-                        <div className="min-h-[32px] flex items-center text-sm">
+                        <div className="min-h-[32px] flex items-center text-sm px-2 py-1">
                           {column.position === 2 ? 'Neuen Eintrag hinzufügen...' : ''}
                         </div>
                       </TableCell>
                     ))}
                     
                     {/* Add Column Cell */}
-                    <TableCell className="w-24"></TableCell>
+                    <TableCell className="w-24 border-r border-gray-300"></TableCell>
                   </TableRow>
                 </TableBody>
               </Table>
@@ -1807,59 +2941,147 @@ export function EnhancedDataTable({
           </CardContent>
         </Card>
 
-        {/* Enhanced Statistics Bar */}
-        {(columnFilters.size > 0 || selectedRows.size > 0) && (
+        {/* Enhanced Statistics Bar - Non-sticky version for filters only */}
+        {columnFilters.size > 0 && selectedRows.size === 0 && (
           <div className="flex items-center justify-between p-3 bg-blue-50 border border-blue-200 rounded-md">
             <div className="flex items-center space-x-4 text-sm">
-              {columnFilters.size > 0 && (
-                <span className="text-blue-700 font-medium">
-                  {visibleRows.length} von {rows.length} Zeilen (gefiltert)
-                </span>
-              )}
-              {selectedRows.size > 0 && (
-                <span className="text-blue-700 font-semibold">
-                  {selectedRows.size} Zeile{selectedRows.size > 1 ? 'n' : ''} ausgewählt
-                </span>
-              )}
+              <span className="text-blue-700 font-medium">
+                {visibleRows.length} von {rows.length} Zeilen (gefiltert)
+              </span>
+            </div>
+          </div>
+        )}
+        
+        {/* Sticky Selection Bar - Only shows when rows are selected */}
+        {selectedRows.size > 0 && (
+          <div className={cn(
+            "fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-200 shadow-lg transition-all duration-300",
+            isSelectionBarMinimized ? "translate-y-[calc(100%-3rem)]" : "translate-y-0"
+          )}>
+            {/* Minimize/Maximize Handle */}
+            <div className="flex items-center justify-center pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsSelectionBarMinimized(!isSelectionBarMinimized)}
+                className="h-6 w-16 p-0 text-gray-400 hover:text-gray-600"
+                title={isSelectionBarMinimized ? "Funktionsleiste maximieren" : "Funktionsleiste minimieren"}
+              >
+                {isSelectionBarMinimized ? (
+                  <ChevronDown className="h-4 w-4 rotate-180" />
+                ) : (
+                  <ChevronDown className="h-4 w-4" />
+                )}
+              </Button>
             </div>
             
-            {selectedRows.size > 0 && (
-              <div className="flex items-center space-x-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => handleDeleteRows(Array.from(selectedRows))}
-                  className="text-red-600 border-red-300 hover:bg-red-50"
-                >
-                  <Trash2 className="h-4 w-4 mr-1" />
-                  Löschen
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => handleHideRows(Array.from(selectedRows))}
-                  className="text-gray-600 border-gray-300 hover:bg-gray-50"
-                >
-                  <EyeOff className="h-4 w-4 mr-1" />
-                  Ausblenden
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setSelectedRows(new Set())}
-                  className="text-gray-500 hover:text-gray-700"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
+            {/* Selection Bar Content */}
+            <div className={cn(
+              "transition-all duration-300 overflow-hidden",
+              isSelectionBarMinimized ? "max-h-0 opacity-0" : "max-h-20 opacity-100"
+            )}>
+              <div className="flex items-center justify-between p-4 pt-2">
+                <div className="flex items-center space-x-4">
+                  {/* Selection Count */}
+                  <div className="flex items-center space-x-2">
+                    <div className="h-2 w-2 bg-blue-500 rounded-full animate-pulse" />
+                    <span className="text-sm font-semibold text-blue-700">
+                      {selectedRows.size} Zeile{selectedRows.size > 1 ? 'n' : ''} ausgewählt
+                    </span>
+                  </div>
+                  
+                  {/* Filter Info */}
+                  {columnFilters.size > 0 && (
+                    <span className="text-sm text-gray-600 border-l border-gray-300 pl-4">
+                      {visibleRows.length} von {rows.length} Zeilen (gefiltert)
+                    </span>
+                  )}
+                </div>
+                
+                {/* Action Buttons */}
+                <div className="flex items-center space-x-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleDeleteRows(Array.from(selectedRows))}
+                    className="text-red-600 border-red-300 hover:bg-red-50"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Löschen ({selectedRows.size})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleHideRows(Array.from(selectedRows))}
+                    className="text-gray-600 border-gray-300 hover:bg-gray-50"
+                  >
+                    <EyeOff className="h-4 w-4 mr-2" />
+                    Ausblenden ({selectedRows.size})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setSelectedRows(new Set())}
+                    className="text-gray-500 hover:text-gray-700"
+                    title="Auswahl aufheben"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+            
+            {/* Minimized State Content */}
+            {isSelectionBarMinimized && (
+              <div className="flex items-center justify-between px-4 pb-3">
+                <span className="text-xs text-gray-600">
+                  {selectedRows.size} ausgewählt
+                </span>
+                <div className="flex items-center space-x-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleDeleteRows(Array.from(selectedRows))}
+                    className="h-6 w-6 p-0 text-red-600 hover:bg-red-50"
+                    title="Löschen"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleHideRows(Array.from(selectedRows))}
+                    className="h-6 w-6 p-0 text-gray-600 hover:bg-gray-50"
+                    title="Ausblenden"
+                  >
+                    <EyeOff className="h-3 w-3" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setSelectedRows(new Set())}
+                    className="h-6 w-6 p-0 text-gray-500 hover:text-gray-700"
+                    title="Auswahl aufheben"
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
               </div>
             )}
           </div>
         )}
-
+        
+        {/* Bottom padding when selection bar is active to prevent content overlap */}
+        {selectedRows.size > 0 && (
+          <div className={cn(
+            "transition-all duration-300",
+            isSelectionBarMinimized ? "h-12" : "h-20"
+          )} />
+        )}
 
         {/* Column Edit Dialog */}
         <Dialog open={!!editingColumn} onOpenChange={() => setEditingColumn(null)}>
-          <DialogContent className="sm:max-w-md">
+          <DialogContent className="sm:max-w-lg">
             <DialogHeader>
               <DialogTitle>Feld bearbeiten</DialogTitle>
             </DialogHeader>
@@ -1897,6 +3119,206 @@ export function EnhancedDataTable({
                     </SelectContent>
                   </Select>
                 </div>
+
+                {/* Select Options Management */}
+                {editingColumn.type === 'select' && (() => {
+                  const currentColumn = columns.find(col => col.id === editingColumn.columnId);
+                  
+                  // Get current options - use fallback if column options aren't defined yet
+                  let currentOptions = currentColumn?.options || [];
+                  
+                  // If no options defined but column is being used as select, infer from existing data
+                  if (currentOptions.length === 0) {
+                    const uniqueValues = rows
+                      .map(row => row.cells.find(cell => cell.columnId === editingColumn.columnId)?.value)
+                      .filter(value => value != null && value !== '' && typeof value === 'string')
+                      .map(value => value.toString());
+                    
+                    currentOptions = Array.from(new Set(uniqueValues));
+                    
+                    // If still no options, use common defaults
+                    if (currentOptions.length === 0) {
+                      currentOptions = ['Active', 'Inactive', 'Pending'];
+                    }
+                  }
+                  
+                  const currentColors = currentColumn?.optionColors || {};
+                  
+                  // Predefined color options
+                  const colorOptions = [
+                    { label: 'Grün', value: 'green', bg: 'bg-green-100', text: 'text-green-800', border: 'border-green-200' },
+                    { label: 'Rot', value: 'red', bg: 'bg-red-100', text: 'text-red-800', border: 'border-red-200' },
+                    { label: 'Gelb', value: 'yellow', bg: 'bg-yellow-100', text: 'text-yellow-800', border: 'border-yellow-200' },
+                    { label: 'Blau', value: 'blue', bg: 'bg-blue-100', text: 'text-blue-800', border: 'border-blue-200' },
+                    { label: 'Lila', value: 'purple', bg: 'bg-purple-100', text: 'text-purple-800', border: 'border-purple-200' },
+                    { label: 'Orange', value: 'orange', bg: 'bg-orange-100', text: 'text-orange-800', border: 'border-orange-200' },
+                    { label: 'Grau', value: 'gray', bg: 'bg-gray-100', text: 'text-gray-800', border: 'border-gray-200' },
+                  ];
+                  
+                  return (
+                    <div className="space-y-2">
+                      <Label>Auswahloptionen mit Farben</Label>
+                      <div className="space-y-3">
+                        {currentOptions.map((option, index) => (
+                          <div key={index} className="flex items-center space-x-2 p-2 border rounded-md">
+                            <Input
+                              value={option}
+                              onChange={(e) => {
+                                if (e.target.value.trim()) {
+                                  const updatedOptions = [...currentOptions];
+                                  const oldOption = updatedOptions[index];
+                                  updatedOptions[index] = e.target.value.trim();
+                                  
+                                  // Update colors mapping if option name changed
+                                  const updatedColors = { ...currentColors };
+                                  if (oldOption !== e.target.value.trim() && updatedColors[oldOption]) {
+                                    updatedColors[e.target.value.trim()] = updatedColors[oldOption];
+                                    delete updatedColors[oldOption];
+                                  }
+                                  
+                                  onColumnUpdate?.(editingColumn.columnId, {
+                                    options: updatedOptions,
+                                    optionColors: updatedColors
+                                  });
+                                }
+                              }}
+                              className="flex-1"
+                              placeholder="Option"
+                            />
+                            
+                            {/* Color Picker */}
+                            <Select
+                              value={(() => {
+                                const storedColor = currentColors[option];
+                                if (typeof storedColor === 'object' && storedColor.bg) {
+                                  // Find color by bg class
+                                  return colorOptions.find(c => c.bg === storedColor.bg)?.value || 'gray';
+                                }
+                                return typeof storedColor === 'string' ? storedColor : 'gray';
+                              })()}
+                              onValueChange={(colorValue) => {
+                                const selectedColor = colorOptions.find(c => c.value === colorValue);
+                                if (selectedColor) {
+                                  const updatedColors = { ...currentColors };
+                                  updatedColors[option] = {
+                                    bg: selectedColor.bg,
+                                    text: selectedColor.text
+                                  };
+                                  onColumnUpdate?.(editingColumn.columnId, { optionColors: updatedColors });
+                                }
+                              }}
+                            >
+                              <SelectTrigger className="w-32">
+                                <div className="flex items-center space-x-2">
+                                  <div className={cn(
+                                    "w-4 h-4 rounded",
+                                    (() => {
+                                      const storedColor = currentColors[option];
+                                      if (typeof storedColor === 'object' && storedColor.bg) {
+                                        return storedColor.bg;
+                                      }
+                                      const colorValue = typeof storedColor === 'string' ? storedColor : 'gray';
+                                      const fallbackColor = colorOptions.find(c => c.value === colorValue);
+                                      return fallbackColor?.bg || 'bg-gray-100';
+                                    })()
+                                  )} />
+                                  <SelectValue placeholder="Farbe" />
+                                </div>
+                              </SelectTrigger>
+                              <SelectContent>
+                                {colorOptions.map((color) => (
+                                  <SelectItem key={color.value} value={color.value}>
+                                    <div className="flex items-center space-x-2">
+                                      <div className={cn("w-4 h-4 rounded", color.bg)} />
+                                      <span>{color.label}</span>
+                                    </div>
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            
+                            {/* Preview Badge */}
+                            <Badge
+                              className={cn(
+                                "text-xs",
+                                (() => {
+                                  const storedColor = currentColors[option];
+                                  if (typeof storedColor === 'object' && storedColor.bg) {
+                                    return `${storedColor.bg} ${storedColor.text}`;
+                                  }
+                                  const colorValue = typeof storedColor === 'string' ? storedColor : 'gray';
+                                  const fallbackColor = colorOptions.find(c => c.value === colorValue);
+                                  return `${fallbackColor?.bg || 'bg-gray-100'} ${fallbackColor?.text || 'text-gray-800'}`;
+                                })()
+                              )}
+                            >
+                              {option}
+                            </Badge>
+                            
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                const updatedOptions = currentOptions.filter((_, i) => i !== index);
+                                const updatedColors = { ...currentColors };
+                                delete updatedColors[option];
+                                onColumnUpdate?.(editingColumn.columnId, {
+                                  options: updatedOptions,
+                                  optionColors: updatedColors
+                                });
+                              }}
+                              className="text-red-600 hover:text-red-700"
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ))}
+                        
+                        {/* Add new option */}
+                        <div className="flex items-center space-x-2 p-2 border border-dashed rounded-md">
+                          <Input
+                            placeholder="Neue Option hinzufügen..."
+                            className="flex-1"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+                                e.preventDefault();
+                                const newOption = e.currentTarget.value.trim();
+                                const updatedOptions = [...currentOptions, newOption];
+                                const updatedColors = { ...currentColors };
+                                updatedColors[newOption] = { bg: 'bg-gray-100', text: 'text-gray-800' }; // Default color
+                                onColumnUpdate?.(editingColumn.columnId, {
+                                  options: updatedOptions,
+                                  optionColors: updatedColors
+                                });
+                                e.currentTarget.value = '';
+                              }
+                            }}
+                          />
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              const input = e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement;
+                              if (input?.value.trim()) {
+                                const newOption = input.value.trim();
+                                const updatedOptions = [...currentOptions, newOption];
+                                const updatedColors = { ...currentColors };
+                                updatedColors[newOption] = { bg: 'bg-gray-100', text: 'text-gray-800' }; // Default color
+                                onColumnUpdate?.(editingColumn.columnId, {
+                                  options: updatedOptions,
+                                  optionColors: updatedColors
+                                });
+                                input.value = '';
+                              }
+                            }}
+                          >
+                            <Plus className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
             <DialogFooter>
@@ -2048,6 +3470,266 @@ export function EnhancedDataTable({
                     {contextMenu.rowIds.length === 1 ? 'Temporär verbergen' : `${contextMenu.rowIds.length} Datensätze temporär verbergen`}
                   </div>
                 </div>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* CSV Import Dialog */}
+        <Dialog open={showCSVImportDialog} onOpenChange={setShowCSVImportDialog}>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="flex items-center">
+                <Upload className="h-5 w-5 mr-2" />
+                CSV Import
+              </DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+              <div className="space-y-4">
+                <div className="text-sm text-gray-600 mb-4">
+                  Wählen Sie eine CSV-Datei aus, um Daten in diese Tabelle zu importieren:
+                </div>
+                
+                <div className="border-2 border-dashed border-gray-300 rounded-lg p-6">
+                  <div className="text-center">
+                    <Upload className="mx-auto h-12 w-12 text-gray-400" />
+                    <div className="mt-4">
+                      <label htmlFor="csv-file-input" className="cursor-pointer">
+                        <span className="mt-2 block text-sm font-medium text-gray-900">
+                          {csvImportFile ? csvImportFile.name : 'CSV-Datei auswählen'}
+                        </span>
+                      </label>
+                      <p className="mt-2 text-xs text-gray-500">
+                        Unterstützte Formate: .csv (erste Zeile als Header)
+                      </p>
+                    </div>
+                    <div className="mt-4">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => document.getElementById('csv-file-input')?.click()}
+                      >
+                        Datei auswählen
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {csvImportFile && (
+                  <div className="bg-green-50 border border-green-200 rounded-md p-4">
+                    <div className="flex">
+                      <div className="flex-shrink-0">
+                        <FileText className="h-5 w-5 text-green-400" />
+                      </div>
+                      <div className="ml-3">
+                        <h3 className="text-sm font-medium text-green-800">
+                          Datei bereit zum Import
+                        </h3>
+                        <div className="mt-2 text-sm text-green-700">
+                          <p>Datei: {csvImportFile.name}</p>
+                          <p>Größe: {Math.round(csvImportFile.size / 1024)} KB</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowCSVImportDialog(false);
+                  setCSVImportFile(null);
+                  setCSVImportData(null);
+                }}
+              >
+                Abbrechen
+              </Button>
+              <Button
+                onClick={handleImportConfirm}
+                disabled={!csvImportFile}
+              >
+                Importieren
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* CSV Column Mapping Dialog */}
+        <CSVColumnMappingDialog
+          open={showCSVMappingDialog}
+          onOpenChange={setShowCSVMappingDialog}
+          csvFile={csvImportFile}
+          existingColumns={visibleColumns}
+          onConfirm={handleMappingConfirm}
+          onCancel={handleMappingCancel}
+        />
+
+        {/* Cell Context Menu */}
+        {cellContextMenu && (
+          <div
+            className="fixed z-50 bg-white border border-gray-200 rounded-lg shadow-xl py-2 min-w-48"
+            style={{
+              top: cellContextMenu.y,
+              left: cellContextMenu.x,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-2 text-xs font-semibold text-gray-500 border-b border-gray-100 bg-gray-50">
+              Zelle bearbeiten
+            </div>
+            
+            <div className="py-1">
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                onClick={async () => {
+                  // Create temporary range for single cell
+                  const column = visibleColumns.find(col => col.id === cellContextMenu.columnId);
+                  if (column) {
+                    const tempRange = {
+                      startRow: cellContextMenu.rowId,
+                      endRow: cellContextMenu.rowId,
+                      startCol: column.position,
+                      endCol: column.position
+                    };
+                    setSelectedRange(tempRange);
+                    setTimeout(() => {
+                      handleCopy();
+                      setCellContextMenu(null);
+                    }, 10);
+                  }
+                }}
+              >
+                📋 Kopieren
+              </button>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                onClick={async () => {
+                  // Create temporary range for single cell
+                  const column = visibleColumns.find(col => col.id === cellContextMenu.columnId);
+                  if (column) {
+                    const tempRange = {
+                      startRow: cellContextMenu.rowId,
+                      endRow: cellContextMenu.rowId,
+                      startCol: column.position,
+                      endCol: column.position
+                    };
+                    setSelectedRange(tempRange);
+                    setTimeout(() => {
+                      handleCut();
+                      setCellContextMenu(null);
+                    }, 10);
+                  }
+                }}
+              >
+                ✂️ Ausschneiden
+              </button>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                onClick={async () => {
+                  if (focusedCell && focusedCell.rowId === cellContextMenu.rowId && focusedCell.columnId === cellContextMenu.columnId) {
+                    await handlePaste();
+                  }
+                  setCellContextMenu(null);
+                }}
+                disabled={!focusedCell || focusedCell.rowId !== cellContextMenu.rowId || focusedCell.columnId !== cellContextMenu.columnId}
+              >
+                📄 Einfügen
+              </button>
+              
+              <div className="border-t my-1"></div>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                onClick={async () => {
+                  await handleDeleteCell(cellContextMenu.rowId, cellContextMenu.columnId);
+                  setCellContextMenu(null);
+                }}
+              >
+                🗑️ Inhalt löschen
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Column Context Menu */}
+        {columnContextMenu && (
+          <div
+            className="fixed z-50 bg-white border border-gray-200 rounded-lg shadow-xl py-2 min-w-48"
+            style={{
+              top: columnContextMenu.y,
+              left: columnContextMenu.x,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-2 text-xs font-semibold text-gray-500 border-b border-gray-100 bg-gray-50">
+              Spalte bearbeiten
+            </div>
+            
+            <div className="py-1">
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                onClick={async () => {
+                  await handleCopy();
+                  setColumnContextMenu(null);
+                }}
+              >
+                📋 Spalte kopieren
+              </button>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                onClick={async () => {
+                  await handleCut();
+                  setColumnContextMenu(null);
+                }}
+              >
+                ✂️ Spalte ausschneiden
+              </button>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                onClick={async () => {
+                  await handleDeleteSelectedColumns();
+                  setColumnContextMenu(null);
+                }}
+              >
+                🗑️ Spalteninhalt löschen
+              </button>
+              
+              <div className="border-t my-1"></div>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                onClick={() => {
+                  handleEditColumn(columnContextMenu.columnId);
+                  setColumnContextMenu(null);
+                }}
+              >
+                ✏️ Spalte bearbeiten
+              </button>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                onClick={async () => {
+                  await handleHideColumn(columnContextMenu.columnId);
+                  setColumnContextMenu(null);
+                }}
+              >
+                👁️ Spalte ausblenden
+              </button>
+              
+              <button
+                className="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                onClick={async () => {
+                  await handleDeleteColumn(columnContextMenu.columnId);
+                  setColumnContextMenu(null);
+                }}
+              >
+                🗑️ Spalte löschen
               </button>
             </div>
           </div>

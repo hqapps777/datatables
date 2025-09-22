@@ -16,6 +16,12 @@ import {
 import { Input } from '@/components/ui/input';
 import { EnhancedDataTable, type Column, type Row } from '@/components/tables/enhanced-data-table';
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
   TableIcon,
   Plus,
   Settings,
@@ -24,6 +30,9 @@ import {
   Filter,
   Search,
   ArrowUpDown,
+  Upload,
+  FileText,
+  ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -124,6 +133,7 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
   const [columns, setColumns] = useState<Column[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [tableId, setTableId] = useState<number>(1);
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
 
   // Handle async params and load data
   useEffect(() => {
@@ -736,6 +746,511 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
     }
   };
 
+  // CSV Import/Export handlers
+  const handleCSVImport = async (file: File, mappings?: any) => {
+    try {
+      setIsLoading(true);
+      
+      // Try API first, then fall back to local import for demo
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        if (mappings) {
+          formData.append('mappings', JSON.stringify(mappings));
+        }
+
+        const response = await fetch(`/api/tables/${tableId}/import/csv`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          toast.success(`${result.data.imported} rows imported successfully`);
+          
+          // Reload table data
+          loadTableData(tableId);
+          return;
+        } else {
+          console.log('API import failed, using local fallback');
+        }
+      } catch (apiError) {
+        console.log('API not available, using local fallback');
+      }
+
+      // Local fallback import
+      await importCSVLocally(file);
+      
+    } catch (error) {
+      console.error('Error importing CSV:', error);
+      toast.error('Error importing CSV');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Local CSV import fallback for demo
+  const importCSVLocally = async (file: File) => {
+    return new Promise<void>((resolve, reject) => {
+      const reader = new FileReader();
+      
+      reader.onload = (e) => {
+        try {
+          const csvText = e.target?.result as string;
+          if (!csvText) {
+            throw new Error('Could not read file');
+          }
+
+          // Parse CSV
+          const lines = csvText.split('\n').filter(line => line.trim());
+          if (lines.length === 0) {
+            throw new Error('CSV file is empty');
+          }
+
+          // Parse header row
+          const headerLine = lines[0];
+          const headers = parseCSVRow(headerLine);
+          
+          if (headers.length === 0) {
+            throw new Error('No headers found in CSV');
+          }
+
+          // Parse data rows
+          const dataRows = lines.slice(1).map(line => parseCSVRow(line));
+          const validRows = dataRows.filter(row => row.length > 0);
+
+          if (validRows.length === 0) {
+            toast.warning('No data rows found in CSV');
+            resolve();
+            return;
+          }
+
+          // Create new columns for headers that don't exist
+          const existingColumnNames = columns.map(col => col.name.toLowerCase());
+          const newColumns = [...columns];
+          let maxPosition = Math.max(...columns.map(col => col.position), 0);
+
+          headers.forEach((header, index) => {
+            const headerLower = header.toLowerCase();
+            if (!existingColumnNames.includes(headerLower)) {
+              maxPosition++;
+              newColumns.push({
+                id: Math.max(...columns.map(c => c.id), 0) + newColumns.length - columns.length + 1,
+                name: header,
+                type: detectColumnType(validRows.map(row => row[index] || '')),
+                position: maxPosition,
+                isVisible: true
+              });
+            }
+          });
+
+          // Create new rows
+          let maxRowId = Math.max(...rows.map(r => r.id), 0);
+          const newRows = [...rows];
+
+          validRows.forEach(rowData => {
+            maxRowId++;
+            const cells = headers.map((header, headerIndex) => {
+              const column = newColumns.find(col =>
+                col.name.toLowerCase() === header.toLowerCase()
+              );
+              
+              if (!column) return null;
+
+              let value = rowData[headerIndex] || '';
+              
+              // Convert value based on column type
+              if (column.type === 'number' && value) {
+                const numValue = parseFloat(value);
+                value = isNaN(numValue) ? '0' : numValue.toString();
+              } else if (column.type === 'select') {
+                value = value || 'Active';
+              }
+
+              return {
+                columnId: column.id,
+                value
+              };
+            }).filter(Boolean) as Array<{columnId: number, value: any}>;
+
+            newRows.push({
+              id: maxRowId,
+              cells
+            });
+          });
+
+          // Update state
+          setColumns(newColumns);
+          setRows(newRows);
+          
+          // Save to localStorage
+          saveTableData(newRows, newColumns);
+
+          toast.success(`Successfully imported ${validRows.length} rows with ${headers.length} columns`);
+          resolve();
+
+        } catch (error) {
+          console.error('Error parsing CSV:', error);
+          reject(error);
+        }
+      };
+
+      reader.onerror = () => {
+        reject(new Error('Error reading file'));
+      };
+
+      reader.readAsText(file);
+    });
+  };
+
+  // Helper function to parse CSV row
+  const parseCSVRow = (line: string): string[] => {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          // Escaped quote
+          current += '"';
+          i++; // Skip next quote
+        } else {
+          // Toggle quote mode
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        // Field separator
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    
+    // Add last field
+    result.push(current.trim());
+    
+    return result;
+  };
+
+  // Helper function to detect column type
+  const detectColumnType = (values: string[]): string => {
+    const nonEmptyValues = values.filter(v => v && v.trim());
+    
+    if (nonEmptyValues.length === 0) return 'text';
+    
+    // Check if all are numbers
+    if (nonEmptyValues.every(v => !isNaN(parseFloat(v)) && isFinite(parseFloat(v)))) {
+      return 'number';
+    }
+    
+    // Check if all are emails
+    if (nonEmptyValues.every(v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v))) {
+      return 'email';
+    }
+    
+    // Check if all are dates
+    if (nonEmptyValues.every(v => !isNaN(Date.parse(v)))) {
+      return 'date';
+    }
+    
+    // Check if it looks like select values (limited unique values)
+    const uniqueValues = [...new Set(nonEmptyValues)];
+    if (uniqueValues.length <= 10 && nonEmptyValues.length > uniqueValues.length * 2) {
+      return 'select';
+    }
+    
+    return 'text';
+  };
+
+  const handleCSVExport = async (options?: { includeFormulas?: boolean }) => {
+    try {
+      setIsLoading(true);
+      
+      // Try API first, then fall back to local export for demo
+      try {
+        const params = new URLSearchParams();
+        if (options?.includeFormulas) {
+          params.set('includeFormulas', 'true');
+        }
+
+        const response = await fetch(`/api/tables/${tableId}/export/csv?${params.toString()}`);
+        
+        if (response.ok) {
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('text/csv')) {
+            // CSV response
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${mockTableData.name}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            toast.success('CSV exported successfully');
+            return;
+          } else {
+            // JSON response with files
+            const result = await response.json();
+            if (result.files) {
+              // Handle multiple files (CSV + formulas)
+              for (const [filename, content] of Object.entries(result.files)) {
+                const blob = new Blob([content as string], {
+                  type: filename.endsWith('.json') ? 'application/json' : 'text/csv'
+                });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+              }
+              toast.success('CSV exported successfully');
+              return;
+            }
+          }
+        } else {
+          // API error, fall back to local export
+          console.log('API export failed, using local fallback');
+        }
+      } catch (apiError) {
+        // API error, fall back to local export
+        console.log('API not available, using local fallback');
+      }
+
+      // Local fallback export
+      exportCSVLocally(options?.includeFormulas || false);
+      
+    } catch (error) {
+      console.error('Error exporting CSV:', error);
+      toast.error('Error exporting CSV');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Local CSV export fallback for demo
+  const exportCSVLocally = (includeFormulas: boolean) => {
+    try {
+      // Determine rows to export: selected rows OR all visible rows
+      const rowsToExport = selectedRows.size > 0
+        ? rows.filter(row => selectedRows.has(row.id) && !row.isHidden)
+        : rows.filter(row => !row.isHidden);
+      
+      // Generate CSV headers
+      const headers = visibleColumns.map(col => col.name);
+      let csvContent = headers.map(h => `"${h.replace(/"/g, '""')}"`).join(',') + '\n';
+      
+      // Generate CSV rows
+      for (const row of rowsToExport) {
+        const rowValues = visibleColumns.map(column => {
+          const cell = row.cells.find(c => c.columnId === column.id);
+          let value = cell?.value || '';
+          
+          // Handle different data types
+          if (typeof value === 'string') {
+            // Escape quotes and wrap in quotes if contains comma, quote, or newline
+            if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+              value = `"${value.replace(/"/g, '""')}"`;
+            }
+          } else if (value !== null && value !== undefined) {
+            value = String(value);
+          } else {
+            value = '';
+          }
+          
+          return value;
+        });
+        
+        csvContent += rowValues.join(',') + '\n';
+      }
+      
+      // Create and download file
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      const timestamp = new Date().toISOString().split('T')[0];
+      const exportScope = selectedRows.size > 0 ? `${selectedRows.size}_selected` : 'all';
+      const filename = `${mockTableData.name}_${timestamp}_${exportScope}.csv`;
+      a.download = filename;
+      
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+      if (includeFormulas) {
+        // Also export formulas as JSON
+        const formulaData = {
+          table: mockTableData.name,
+          exportedAt: new Date().toISOString(),
+          formulas: rowsToExport.reduce((acc, row) => {
+            const rowFormulas: Record<string, string> = {};
+            visibleColumns.forEach(column => {
+              const cell = row.cells.find(c => c.columnId === column.id);
+              if (cell?.formula) {
+                rowFormulas[column.name] = cell.formula;
+              }
+            });
+            if (Object.keys(rowFormulas).length > 0) {
+              acc[`Row_${row.id}`] = rowFormulas;
+            }
+            return acc;
+          }, {} as Record<string, Record<string, string>>)
+        };
+        
+        const formulaBlob = new Blob([JSON.stringify(formulaData, null, 2)], {
+          type: 'application/json;charset=utf-8;'
+        });
+        const formulaUrl = window.URL.createObjectURL(formulaBlob);
+        const formulaLink = document.createElement('a');
+        formulaLink.href = formulaUrl;
+        formulaLink.download = `${mockTableData.name}_${timestamp}_formulas.json`;
+        document.body.appendChild(formulaLink);
+        formulaLink.click();
+        window.URL.revokeObjectURL(formulaUrl);
+        document.body.removeChild(formulaLink);
+      }
+      
+      const scopeText = selectedRows.size > 0 ? `${selectedRows.size} markierte Zeilen` : 'alle Zeilen';
+      toast.success(`CSV (${scopeText}) erfolgreich exportiert`);
+    } catch (error) {
+      console.error('Error in local CSV export:', error);
+      toast.error('Error exporting CSV');
+    }
+  };
+
+  // Get visible columns for export
+  const visibleColumns = columns.filter(col => col.isVisible !== false);
+
+  // JSON Export handler
+  const handleJSONExport = async (exportType: 'formulas' | 'values') => {
+    try {
+      setIsLoading(true);
+      
+      // Determine rows to export: selected rows OR all visible rows
+      const rowsToExport = selectedRows.size > 0
+        ? rows.filter(row => selectedRows.has(row.id) && !row.isHidden)
+        : rows.filter(row => !row.isHidden);
+      
+      // Generate JSON data
+      const timestamp = new Date().toISOString().split('T')[0];
+      const exportScope = selectedRows.size > 0 ? `${selectedRows.size}_selected` : 'all';
+      const filename = `${mockTableData.name}_${timestamp}_${exportScope}_${exportType}.json`;
+      
+      const visibleColumns = columns.filter(col => col.isVisible !== false);
+      
+      let jsonData;
+      
+      if (exportType === 'formulas') {
+        // Export formulas structure
+        jsonData = {
+          table: {
+            name: mockTableData.name,
+            id: mockTableData.id,
+            exportedAt: new Date().toISOString(),
+            exportType: 'formulas'
+          },
+          columns: visibleColumns.map(col => ({
+            id: col.id,
+            name: col.name,
+            type: col.type,
+            position: col.position,
+            isComputed: col.isComputed
+          })),
+          formulas: rowsToExport.reduce((acc, row) => {
+            const rowFormulas: Record<string, string> = {};
+            visibleColumns.forEach(column => {
+              const cell = row.cells.find(c => c.columnId === column.id);
+              if (cell?.formula) {
+                rowFormulas[column.name] = cell.formula;
+              }
+            });
+            if (Object.keys(rowFormulas).length > 0) {
+              acc[`Row_${row.id}`] = rowFormulas;
+            }
+            return acc;
+          }, {} as Record<string, Record<string, string>>),
+          metadata: {
+            totalRows: rowsToExport.length,
+            totalColumns: visibleColumns.length,
+            rowsWithFormulas: rowsToExport.filter(row =>
+              row.cells.some(cell => cell.formula)
+            ).length,
+            exportScope: selectedRows.size > 0 ? 'selected' : 'all',
+            selectedRowCount: selectedRows.size
+          }
+        };
+      } else {
+        // Export values structure
+        jsonData = {
+          table: {
+            name: mockTableData.name,
+            id: mockTableData.id,
+            exportedAt: new Date().toISOString(),
+            exportType: 'values'
+          },
+          columns: visibleColumns.map(col => ({
+            id: col.id,
+            name: col.name,
+            type: col.type,
+            position: col.position
+          })),
+          data: rowsToExport.map(row => {
+            const rowData: Record<string, any> = {
+              id: row.id
+            };
+            visibleColumns.forEach(column => {
+              const cell = row.cells.find(c => c.columnId === column.id);
+              rowData[column.name] = cell?.value || null;
+            });
+            return rowData;
+          }),
+          metadata: {
+            totalRows: rowsToExport.length,
+            totalColumns: visibleColumns.length,
+            exportFormat: 'JSON',
+            exportScope: selectedRows.size > 0 ? 'selected' : 'all',
+            selectedRowCount: selectedRows.size
+          }
+        };
+      }
+      
+      // Create and download file
+      const jsonString = JSON.stringify(jsonData, null, 2);
+      const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+      const scopeText = selectedRows.size > 0 ? `${selectedRows.size} markierte Zeilen` : 'alle Zeilen';
+      toast.success(`JSON ${exportType === 'formulas' ? 'mit Formeln' : 'mit Werten'} (${scopeText}) erfolgreich exportiert`);
+      
+    } catch (error) {
+      console.error('Error exporting JSON:', error);
+      toast.error('Fehler beim JSON Export');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -770,8 +1285,8 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         </div>
 
-        {/* Search only */}
-        <div className="flex items-center">
+        {/* Search and CSV Import/Export */}
+        <div className="flex items-center justify-between">
           <div className="relative">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
@@ -780,6 +1295,53 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
+          </div>
+          <div className="flex items-center space-x-2">
+            <input
+              type="file"
+              accept=".csv"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleCSVImport(file);
+              }}
+              className="hidden"
+              id="csv-file-input"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => document.getElementById('csv-file-input')?.click()}
+            >
+              <Upload className="h-4 w-4 mr-1" />
+              CSV Importieren
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => handleCSVExport()}
+            >
+              <Download className="h-4 w-4 mr-1" />
+              CSV Exportieren
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline">
+                  <FileText className="h-4 w-4 mr-1" />
+                  JSON exportieren
+                  <ChevronDown className="h-4 w-4 ml-1" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent>
+                <DropdownMenuItem onClick={() => handleJSONExport('formulas')}>
+                  <FileText className="h-4 w-4 mr-2" />
+                  Mit Formeln
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => handleJSONExport('values')}>
+                  <FileText className="h-4 w-4 mr-2" />
+                  Mit Werten
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 
@@ -798,6 +1360,10 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
           onColumnInsert={handleColumnInsert}
           onColumnDelete={handleColumnDelete}
           onColumnHide={handleColumnHide}
+          onCSVImport={handleCSVImport}
+          onCSVExport={handleCSVExport}
+          selectedRows={selectedRows}
+          onSelectedRowsChange={setSelectedRows}
         />
 
         {/* Table Stats - simplified */}

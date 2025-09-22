@@ -375,3 +375,72 @@ export async function POST(request: NextRequest, { params }: Params) {
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
+
+/**
+ * PUT /api/tables/[id]/rows - Update row order (for drag & drop)
+ * Requires: edit permission on table
+ * Body: { rowOrder: number[] }
+ */
+export async function PUT(request: NextRequest, { params }: Params) {
+  const resolvedParams = await params;
+  const tableId = parseInt(resolvedParams.id);
+
+  if (isNaN(tableId)) {
+    return NextResponse.json({ error: 'Invalid table ID' }, { status: 400 });
+  }
+
+  // Authenticate and authorize
+  const authResult = await withAuth(request, {
+    tableId,
+    requiredPermission: 'edit'
+  });
+
+  if (!authResult.success) {
+    return authResult.response!;
+  }
+
+  try {
+    const body = await request.json();
+    const { rowOrder } = body;
+
+    if (!Array.isArray(rowOrder) || !rowOrder.every(id => typeof id === 'number')) {
+      return NextResponse.json({ error: 'Invalid rowOrder format' }, { status: 400 });
+    }
+
+    // Verify table exists
+    const table = await db
+      .select()
+      .from(tables)
+      .where(eq(tables.id, tableId))
+      .limit(1);
+
+    if (!table[0]) {
+      throw new NotFoundError('Table not found');
+    }
+
+    // Verify all row IDs exist and belong to this table
+    const existingRows = await db
+      .select({ id: rows.id })
+      .from(rows)
+      .where(and(eq(rows.tableId, tableId), inArray(rows.id, rowOrder)));
+
+    if (existingRows.length !== rowOrder.length) {
+      return NextResponse.json({ error: 'Some row IDs are invalid' }, { status: 400 });
+    }
+
+    // Update formula engine with new row order
+    await FormulaIntegration.updateRowOrder(tableId, rowOrder);
+
+    // Note: Row reordering audit logging could be added here if needed
+
+    return NextResponse.json({
+      message: 'Row order updated successfully',
+      rowOrder: rowOrder,
+    });
+
+  } catch (error) {
+    console.error('Error updating row order:', error);
+    const errorResponse = handleApiError(error as Error);
+    return NextResponse.json(errorResponse, { status: errorResponse.status });
+  }
+}

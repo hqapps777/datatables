@@ -80,6 +80,7 @@ export class CellMapper {
   private tableColumns: Map<number, { id: number; name: string; position: number }> = new Map();
   private columnPositions: Map<number, number> = new Map(); // columnId -> position
   private positionToColumnId: Map<number, number> = new Map(); // position -> columnId
+  private rowOrder: number[] = []; // Current row order (rowIds in display order)
 
   constructor(private tableId: number) {}
 
@@ -105,19 +106,32 @@ export class CellMapper {
   }
 
   /**
+   * Update the current row order for position-based A1 references
+   */
+  updateRowOrder(rowOrder: number[]): void {
+    this.rowOrder = [...rowOrder];
+  }
+
+  /**
    * Convert database cell (rowId, columnId) to A1 notation
+   * Uses position in current row order instead of rowId
    */
   cellToA1(rowId: number, columnId: number): string | null {
     const position = this.columnPositions.get(columnId);
     if (position === undefined) return null;
 
-    // For row number, we need to map rowId to a sequential row number
-    // For now, we'll use rowId directly (this might need adjustment based on your needs)
-    return A1NotationMapper.coordsToA1(rowId, position);
+    // Find the current position of this row in the ordered list
+    const currentRowPosition = this.rowOrder.findIndex(id => id === rowId) + 1;
+    
+    // If row not found in order, fall back to rowId (for backward compatibility)
+    const rowPosition = currentRowPosition > 0 ? currentRowPosition : rowId;
+
+    return A1NotationMapper.coordsToA1(rowPosition, position);
   }
 
   /**
    * Convert A1 notation to database coordinates
+   * Uses position in current row order to find the correct rowId
    */
   a1ToCell(a1: string): { rowId: number; columnId: number } | null {
     try {
@@ -126,8 +140,14 @@ export class CellMapper {
       
       if (columnId === undefined) return null;
 
+      // Convert row position to actual rowId using current row order
+      const rowId = this.rowOrder[coords.row - 1];
+      
+      // If no row order or position out of bounds, fall back to direct mapping
+      const actualRowId = rowId !== undefined ? rowId : coords.row;
+
       return {
-        rowId: coords.row, // Direct mapping for now
+        rowId: actualRowId,
         columnId
       };
     } catch {
