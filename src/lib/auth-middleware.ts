@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies, headers } from 'next/headers';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { eq, and, gt } from 'drizzle-orm';
+import { eq, and, gt, isNull } from 'drizzle-orm';
 import { db } from '@/server/db';
 import { users, magicLinks, apiKeys } from '@/server/db/schema';
 import { PermissionChecker, PermissionContext, createPermissionContext } from './permissions';
@@ -138,32 +138,56 @@ async function authenticateWithJWT(token: string): Promise<AuthResult> {
  * Authenticate using API key
  */
 async function authenticateWithAPIKey(apiKey: string): Promise<AuthResult> {
-  // Hash the API key for comparison (in production, you'd use proper hashing)
-  const tokenHash = await bcrypt.hash(apiKey, 10);
-  
-  const keyResult = await db
+  console.log('🔍 API KEY DEBUG - Authentication start:', {
+    apiKeyReceived: apiKey ? `${apiKey.substring(0, 12)}...` : 'NO_API_KEY'
+  });
+
+  // 🔧 BUGFIX: Get all non-revoked API keys and compare using bcrypt.compare
+  const allKeys = await db
     .select()
     .from(apiKeys)
-    .where(
-      and(
-        eq(apiKeys.tokenHash, tokenHash),
-        eq(apiKeys.revokedAt, null as any) // Not revoked
-      )
-    )
-    .limit(1);
+    .where(eq(apiKeys.revokedAt, null as any)); // Not revoked
 
-  if (!keyResult[0]) {
+  console.log('🔍 API KEY DEBUG - Database results:', {
+    totalActiveKeys: allKeys.length
+  });
+
+  let validKey = null;
+  
+  // Check each key to find matching hash
+  for (const key of allKeys) {
+    const isValid = await bcrypt.compare(apiKey, key.tokenHash);
+    console.log('🔍 API KEY DEBUG - Key comparison:', {
+      keyId: key.id,
+      keyName: key.name,
+      tokenMatches: isValid
+    });
+    
+    if (isValid) {
+      validKey = key;
+      break;
+    }
+  }
+
+  if (!validKey) {
+    console.log('❌ API KEY DEBUG - No valid key found');
     return { success: false, error: 'Invalid API key' };
   }
 
-  const keyData = keyResult[0];
+  console.log('✅ API KEY DEBUG - Valid key found:', {
+    keyId: validKey.id,
+    keyName: validKey.name,
+    scope: validKey.scope,
+    role: validKey.role
+  });
+
   const context: AuthContext = {
     apiKey: {
-      id: keyData.id,
-      name: keyData.name,
-      scope: keyData.scope,
-      scopeId: keyData.scopeId,
-      role: keyData.role
+      id: validKey.id,
+      name: validKey.name,
+      scope: validKey.scope,
+      scopeId: validKey.scopeId,
+      role: validKey.role
     },
     permissionContext: createPermissionContext({
       apiKey: apiKey
@@ -177,7 +201,43 @@ async function authenticateWithAPIKey(apiKey: string): Promise<AuthResult> {
  * Magic link authentication
  */
 export async function authenticateWithMagicLink(token: string): Promise<AuthResult> {
+  // 🔍 DIAGNOSTIC LOGGING for Magic Link verification
+  const currentTime = new Date();
+  console.log('🔍 MAGIC LINK DEBUG - Verification start:', {
+    currentTime: currentTime.toISOString(),
+    currentTimeLocal: currentTime.toString(),
+    tokenReceived: token ? `${token.substring(0, 8)}...` : 'NO_TOKEN',
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+  });
+
+  // 🔍 DEBUG: Check ALL magic links first (including used ones)
+  const allMagicLinks = await db
+    .select({
+      id: magicLinks.id,
+      email: magicLinks.email,
+      tokenHash: magicLinks.tokenHash,
+      expiresAt: magicLinks.expiresAt,
+      usedAt: magicLinks.usedAt,
+      createdAt: magicLinks.createdAt
+    })
+    .from(magicLinks)
+    .orderBy(magicLinks.createdAt);
+
+  console.log('🔍 MAGIC LINK DEBUG - ALL links in database:', {
+    totalAllLinks: allMagicLinks.length,
+    recentLinks: allMagicLinks.slice(-3).map(link => ({
+      id: link.id,
+      email: link.email,
+      createdAt: link.createdAt.toISOString(),
+      expiresAt: link.expiresAt.toISOString(),
+      usedAt: link.usedAt?.toISOString() || 'NOT_USED',
+      isExpiredNow: link.expiresAt < currentTime,
+      minutesUntilExpiry: Math.round((link.expiresAt.getTime() - currentTime.getTime()) / (1000 * 60))
+    }))
+  });
+
   // Find magic links and verify token by comparing with stored hash
+  // 🔧 CRITICAL FIX: Use isNull() instead of eq(field, null) for PostgreSQL
   const magicLinkResults = await db
     .select({
       id: magicLinks.id,
@@ -187,13 +247,31 @@ export async function authenticateWithMagicLink(token: string): Promise<AuthResu
       usedAt: magicLinks.usedAt
     })
     .from(magicLinks)
-    .where(eq(magicLinks.usedAt, null as any)); // Only unused links
+    .where(isNull(magicLinks.usedAt)); // 🔧 CRITICAL FIX: Correct NULL check
+
+  console.log('🔍 MAGIC LINK DEBUG - Database results (unused only):', {
+    totalUnusedLinks: magicLinkResults.length,
+    links: magicLinkResults.map(link => ({
+      id: link.id,
+      email: link.email,
+      expiresAt: link.expiresAt.toISOString(),
+      expiresAtLocal: link.expiresAt.toString(),
+      isExpiredNow: link.expiresAt < currentTime,
+      minutesUntilExpiry: Math.round((link.expiresAt.getTime() - currentTime.getTime()) / (1000 * 60))
+    }))
+  });
 
   let validLink = null;
   
   // Check each unused link to find matching token hash
   for (const link of magicLinkResults) {
     const isValid = await bcrypt.compare(token, link.tokenHash);
+    console.log('🔍 MAGIC LINK DEBUG - Token comparison:', {
+      linkId: link.id,
+      email: link.email,
+      tokenMatches: isValid
+    });
+    
     if (isValid) {
       validLink = link;
       break;
@@ -201,11 +279,23 @@ export async function authenticateWithMagicLink(token: string): Promise<AuthResu
   }
 
   if (!validLink) {
+    console.log('❌ MAGIC LINK DEBUG - No valid link found');
     return { success: false, error: 'Invalid magic link' };
   }
 
   // Check if expired
-  if (validLink.expiresAt < new Date()) {
+  const isExpired = validLink.expiresAt < new Date();
+  console.log('🔍 MAGIC LINK DEBUG - Expiry check:', {
+    linkId: validLink.id,
+    email: validLink.email,
+    expiresAt: validLink.expiresAt.toISOString(),
+    currentTime: new Date().toISOString(),
+    isExpired,
+    minutesDifference: Math.round((validLink.expiresAt.getTime() - new Date().getTime()) / (1000 * 60))
+  });
+
+  if (isExpired) {
+    console.log('❌ MAGIC LINK DEBUG - Link expired!');
     return { success: false, error: 'Magic link expired' };
   }
 

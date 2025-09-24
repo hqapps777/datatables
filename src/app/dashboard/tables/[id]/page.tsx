@@ -179,21 +179,35 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
     }
   };
 
-  // Calculate formulas on initial load
+  // Calculate formulas after data is loaded
   useEffect(() => {
-    console.log('🧮 Calculating initial formulas...');
-    const calculatedRows = recalculateFormulas(initialMockRows);
-    setRows(calculatedRows);
-    
-    // Debug log
-    calculatedRows.forEach(row => {
-      row.cells.forEach(cell => {
-        if (cell.formula) {
-          console.log(`📊 Cell ${row.id}-${cell.columnId}: ${cell.formula} = ${cell.value}`);
-        }
-      });
-    });
-  }, []);
+    if (rows.length > 0) {
+      console.log('🧮 Calculating formulas for loaded data...');
+      const calculatedRows = recalculateFormulas(rows);
+      
+      // Only update if formulas actually changed values
+      const hasChanges = calculatedRows.some((row, index) =>
+        row.cells.some((cell, cellIndex) =>
+          cell.value !== rows[index]?.cells[cellIndex]?.value
+        )
+      );
+      
+      if (hasChanges) {
+        setRows(calculatedRows);
+        // Save updated calculations to localStorage
+        saveTableData(calculatedRows, columns);
+        
+        // Debug log
+        calculatedRows.forEach(row => {
+          row.cells.forEach(cell => {
+            if (cell.formula) {
+              console.log(`📊 Cell ${row.id}-${cell.columnId}: ${cell.formula} = ${cell.value}`);
+            }
+          });
+        });
+      }
+    }
+  }, [rows.length > 0 && !isLoading]); // Only run when data is loaded
 
   // Filter rows based on search
   const filteredRows = rows.filter(row =>
@@ -320,13 +334,23 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
     return result;
   };
 
-  // Handle cell updates with formula evaluation
-  const handleCellUpdate = async (rowId: number, columnId: number, value: any, formula?: string) => {
-    setIsLoading(true);
-    
+  // 🔧 OPTIMIZED: Fast cell updates with smart delays only for user actions
+  const handleCellUpdate = async (rowId: number, columnId: number, value: any, formula?: string, options?: { skipDelay?: boolean }) => {
     try {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // 🔄 UNDO INTEGRATION: Get old value before update
+      const oldRow = rows.find(r => r.id === rowId);
+      const oldCell = oldRow?.cells.find(c => c.columnId === columnId);
+      const oldValue = oldCell?.value;
+      const oldFormula = oldCell?.formula;
+      
+      const isPasteOperation = options?.skipDelay || false;
+      
+      console.log('🔧 OPTIMIZED CELL UPDATE:', {
+        rowId, columnId,
+        oldValue, newValue: value,
+        isPasteOperation,
+        timestamp: Date.now()
+      });
       
       let finalValue = value;
       let errorCode: string | undefined = undefined;
@@ -338,7 +362,7 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
         errorCode = result.error;
       }
       
-      // Update local state
+      // 🔧 Update local state IMMEDIATELY for instant UI feedback
       setRows(prevRows => {
         const updatedRows = prevRows.map(row =>
           row.id === rowId
@@ -356,18 +380,37 @@ export default function TableDetailPage({ params }: { params: Promise<{ id: stri
         // Recalculate dependent formulas
         const recalculatedRows = recalculateFormulas(updatedRows);
         
-        // Save to localStorage
+        // Save to localStorage immediately
         saveTableData(recalculatedRows, columns);
         
         return recalculatedRows;
       });
       
-      toast.success('Zelle aktualisiert');
+      // 🔄 UNDO INTEGRATION: Trigger custom event for undo system
+      const column = columns.find(col => col.id === columnId);
+      const undoEvent = new CustomEvent('mock-cell-updated', {
+        detail: {
+          rowId,
+          columnId,
+          oldValue,
+          oldFormula,
+          newValue: finalValue,
+          newFormula: formula,
+          columnName: column?.name || 'Unknown'
+        }
+      });
+      window.dispatchEvent(undoEvent);
+      
+      // 🔧 PERFORMANCE: Only show toast for user actions, not bulk paste
+      if (!isPasteOperation) {
+        toast.success('✅ Zelle aktualisiert');
+      }
+      
     } catch (error) {
-      console.error('Error updating cell:', error);
-      toast.error('Fehler beim Aktualisieren der Zelle');
-    } finally {
-      setIsLoading(false);
+      console.error('❌ Error updating cell:', error);
+      if (!options?.skipDelay) {
+        toast.error('❌ Fehler beim Aktualisieren der Zelle');
+      }
     }
   };
 

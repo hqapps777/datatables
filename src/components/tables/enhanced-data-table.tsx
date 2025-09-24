@@ -20,7 +20,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { FormulaBar } from './formula-bar';
-import { AlertTriangle, Save, X, GripVertical, Filter, ChevronDown, Edit, Plus, SortAsc, SortDesc, Eye, EyeOff, Trash2, Settings, Columns, Download, Upload, FileText } from 'lucide-react';
+import { AlertTriangle, Save, X, GripVertical, Filter, ChevronDown, Edit, Plus, SortAsc, SortDesc, Eye, EyeOff, Trash2, Settings, Columns, Download, Upload, FileText, Undo2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -100,7 +100,7 @@ export interface EnhancedDataTableProps {
   tableId: number;
   columns: Column[];
   rows: Row[];
-  onCellUpdate: (rowId: number, columnId: number, value: any, formula?: string) => Promise<void>;
+  onCellUpdate: (rowId: number, columnId: number, value: any, formula?: string, options?: { skipDelay?: boolean }) => Promise<void>;
   onRowsUpdate?: (rows: Row[]) => void;
   onRowAdd?: () => Promise<void>;
   onRowDelete?: (rowIds: number[]) => Promise<void>;
@@ -135,6 +135,17 @@ export function EnhancedDataTable({
   selectedRows: externalSelectedRows,
   onSelectedRowsChange
 }: EnhancedDataTableProps) {
+  // Undo/Redo State
+  interface UndoAction {
+    type: 'cell_update' | 'bulk_update' | 'row_delete' | 'row_add';
+    timestamp: number;
+    data: any;
+    description: string;
+  }
+  
+  const [undoHistory, setUndoHistory] = useState<UndoAction[]>([]);
+  const [canUndo, setCanUndo] = useState(false);
+
   // State
   const [focusedCell, setFocusedCell] = useState<{
     rowId: number;
@@ -264,6 +275,114 @@ export function EnhancedDataTable({
   
   // Selection bar state
   const [isSelectionBarMinimized, setIsSelectionBarMinimized] = useState(false);
+
+  // Update undo availability when history changes
+  useEffect(() => {
+    setCanUndo(undoHistory.length > 0);
+  }, [undoHistory]);
+
+  // Undo system functions
+  const addToUndoHistory = useCallback((action: UndoAction) => {
+    setUndoHistory(prev => {
+      const newHistory = [...prev, action];
+      // Limit history to last 50 actions for performance
+      return newHistory.slice(-50);
+    });
+    console.log('📝 Undo action added:', action.description);
+  }, []);
+
+  const performUndo = useCallback(async () => {
+    console.log('🚨 UNDO DEBUG - performUndo called!', {
+      historyLength: undoHistory.length,
+      canUndo,
+      timestamp: Date.now()
+    });
+    
+    if (undoHistory.length === 0) {
+      console.log('❌ UNDO DEBUG - No history to undo');
+      return;
+    }
+    
+    const lastAction = undoHistory[undoHistory.length - 1];
+    console.log('🔄 UNDO DEBUG - Performing undo:', {
+      action: lastAction.description,
+      type: lastAction.type,
+      data: lastAction.data,
+      timestamp: lastAction.timestamp
+    });
+    
+    try {
+      switch (lastAction.type) {
+        case 'cell_update':
+          const { rowId, columnId, oldValue, oldFormula } = lastAction.data;
+          console.log('🔄 UNDO DEBUG - Calling onCellUpdate:', {
+            rowId, columnId, oldValue, oldFormula
+          });
+          await onCellUpdate(rowId, columnId, oldValue, oldFormula);
+          break;
+        
+        case 'bulk_update':
+          const { cellUpdates } = lastAction.data;
+          console.log('🔄 UNDO DEBUG - Bulk undo:', cellUpdates.length, 'updates');
+          // Revert each cell update
+          for (const update of cellUpdates) {
+            await onCellUpdate(update.rowId, update.columnId, update.oldValue, update.oldFormula);
+          }
+          break;
+          
+        // Future: Add more undo types as needed
+        default:
+          console.warn('❌ UNDO DEBUG - Unknown undo action type:', lastAction.type);
+      }
+      
+      // Remove the undone action from history
+      setUndoHistory(prev => {
+        const newHistory = prev.slice(0, -1);
+        console.log('🔄 UNDO DEBUG - History updated:', {
+          oldLength: prev.length,
+          newLength: newHistory.length
+        });
+        return newHistory;
+      });
+      console.log('✅ UNDO DEBUG - Undo successful!');
+      
+    } catch (error) {
+      console.error('❌ UNDO DEBUG - Undo failed:', error);
+    }
+  }, [undoHistory, onCellUpdate, canUndo]);
+
+  // 🔄 MOCK INTEGRATION: Listen for mock cell updates to create undo history
+  useEffect(() => {
+    const handleMockCellUpdate = (event: CustomEvent) => {
+      const { detail } = event;
+      console.log('🔄 MOCK INTEGRATION: Received mock cell update event:', detail);
+      
+      // Add to undo history
+      addToUndoHistory({
+        type: 'cell_update',
+        timestamp: Date.now(),
+        data: {
+          rowId: detail.rowId,
+          columnId: detail.columnId,
+          oldValue: detail.oldValue,
+          oldFormula: detail.oldFormula,
+          newValue: detail.newValue,
+          newFormula: detail.newFormula
+        },
+        description: `${detail.columnName} bearbeitet`
+      });
+    };
+
+    // Add event listener for mock cell updates
+    window.addEventListener('mock-cell-updated', handleMockCellUpdate as EventListener);
+    console.log('🔄 MOCK INTEGRATION: Event listener registered');
+
+    // Cleanup event listener
+    return () => {
+      window.removeEventListener('mock-cell-updated', handleMockCellUpdate as EventListener);
+      console.log('🔄 MOCK INTEGRATION: Event listener cleaned up');
+    };
+  }, [addToUndoHistory]);
 
   // Load column widths after hydration
   useEffect(() => {
@@ -568,6 +687,10 @@ export function EnhancedDataTable({
     try {
       console.log('🚀 Saving edit:', { editingCell, editValue });
       
+      // 🔄 UNDO: Capture old value before change
+      const oldCell = getCellValue(editingCell.rowId, editingCell.columnId);
+      const column = columns.find(col => col.id === editingCell.columnId);
+      
       // Save the pending value immediately for instant display
       const cellKey = `${editingCell.rowId}-${editingCell.columnId}`;
       setPendingValues(prev => {
@@ -593,6 +716,20 @@ export function EnhancedDataTable({
       // Call the backend update
       await onCellUpdate(savedEditingCell.rowId, savedEditingCell.columnId, savedEditValue);
       
+      // 🔄 UNDO: Add to history after successful update
+      addToUndoHistory({
+        type: 'cell_update',
+        timestamp: Date.now(),
+        data: {
+          rowId: savedEditingCell.rowId,
+          columnId: savedEditingCell.columnId,
+          oldValue: oldCell?.value,
+          oldFormula: oldCell?.formula,
+          newValue: savedEditValue
+        },
+        description: `Zelle ${column?.name || 'Unknown'} bearbeitet`
+      });
+      
       console.log('✅ Update successful, clearing pending value');
       
       // Clear pending value after successful update
@@ -614,7 +751,7 @@ export function EnhancedDataTable({
         });
       }
     }
-  }, [editingCell, editValue, onCellUpdate]);
+  }, [editingCell, editValue, onCellUpdate, getCellValue, columns, addToUndoHistory]);
 
   const handleCancelEdit = useCallback(() => {
     setEditingCell(null);
@@ -1004,6 +1141,21 @@ export function EnhancedDataTable({
     }
 
     try {
+      // 🔍 DEBUG: Extensive column mapping diagnostics
+      console.log('🔍 COPY DIAGNOSTICS - Initial State:', {
+        selectedRange,
+        selectedRows: Array.from(selectedRows),
+        selectedColumns: Array.from(selectedColumns),
+        isCut,
+        visibleColumnsCount: visibleColumns.length,
+        visibleColumnsDetails: visibleColumns.map((col, idx) => ({
+          arrayIndex: idx,
+          columnId: col.id,
+          position: col.position,
+          name: col.name
+        }))
+      });
+      
       console.log('📋 Starting copy operation:', { selectedRange, selectedRows: Array.from(selectedRows), selectedColumns: Array.from(selectedColumns), isCut });
       
       const data: Array<Array<{ value: any; formula?: string }>> = [];
@@ -1017,10 +1169,36 @@ export function EnhancedDataTable({
           .filter(idx => idx !== -1)
           .sort((a, b) => a - b);
         
+        // 🔍 DEBUG: Column selection mapping diagnostics
+        console.log('🔍 COLUMN COPY DIAGNOSTICS:', {
+          selectedColumnIds,
+          columnIndices,
+          columnDetails: selectedColumnIds.map(colId => {
+            const col = visibleColumns.find(c => c.id === colId);
+            const idx = visibleColumns.findIndex(c => c.id === colId);
+            return {
+              columnId: colId,
+              columnName: col?.name,
+              arrayIndex: idx,
+              position: col?.position,
+              found: !!col
+            };
+          }),
+          visibleColumnsAtIndices: columnIndices.map(idx => ({
+            index: idx,
+            column: visibleColumns[idx] ? {
+              id: visibleColumns[idx].id,
+              name: visibleColumns[idx].name,
+              position: visibleColumns[idx].position
+            } : 'INVALID_INDEX'
+          }))
+        });
+        
         actualStartRow = 1;
         actualEndRow = visibleRows.length;
-        actualStartCol = Math.min(...columnIndices) + 1; // +1 for 1-based indexing
-        actualEndCol = Math.max(...columnIndices) + 1;
+        // 🔧 FIXED: Use actual array indices, not position-based values
+        actualStartCol = Math.min(...columnIndices);
+        actualEndCol = Math.max(...columnIndices);
         
         // 🔧 FIXED: Use visual column indices instead of column.position
         for (let visualRow = actualStartRow; visualRow <= actualEndRow; visualRow++) {
@@ -1036,6 +1214,16 @@ export function EnhancedDataTable({
                 value: cell?.value || '',
                 formula: cell?.formula
               });
+              
+              // 🔍 DEBUG: Sample data collection for first few rows
+              if (visualRow <= 3) {
+                console.log(`🔍 COPY ROW ${visualRow} COL ${colIndex}:`, {
+                  columnName: column.name,
+                  rowId,
+                  cellValue: cell?.value,
+                  cellFormula: cell?.formula
+                });
+              }
             }
           }
           data.push(rowData);
@@ -1076,13 +1264,55 @@ export function EnhancedDataTable({
         actualStartRow = Math.min(startRow, endRow);
         actualEndRow = Math.max(startRow, endRow);
         
-        // Convert column positions to visual indices
-        const startColIndex = Math.min(startCol, endCol) - 1; // Convert to 0-based
-        const endColIndex = Math.max(startCol, endCol) - 1;
-        actualStartCol = startColIndex + 1; // Store as 1-based for consistency
-        actualEndCol = endColIndex + 1;
+        // 🔧 CRITICAL FIX: Correct column position to array index conversion
+        // selectedRange uses column.position (1-based), need to convert to visibleColumns array index (0-based)
+        const startColPos = Math.min(startCol, endCol);
+        const endColPos = Math.max(startCol, endCol);
         
-        // Collect data from selected range using visual column indices
+        // Find actual array indices for these column positions
+        const startColIndex = visibleColumns.findIndex(col => col.position === startColPos);
+        const endColIndex = visibleColumns.findIndex(col => col.position === endColPos);
+        
+        // Store the actual array indices
+        actualStartCol = startColIndex;
+        actualEndCol = endColIndex;
+        
+        console.log('🔧 COLUMN POSITION FIX:', {
+          selectedRangePositions: { startCol, endCol },
+          calculatedPositions: { startColPos, endColPos },
+          foundArrayIndices: { startColIndex, endColIndex },
+          storedRange: { actualStartCol, actualEndCol }
+        });
+        
+        // 🔍 DEBUG: Range copy diagnostics
+        console.log('🔍 RANGE COPY DIAGNOSTICS:', {
+          selectedRange,
+          calculatedRange: {
+            actualStartRow, actualEndRow,
+            startColIndex, endColIndex,
+            actualStartCol, actualEndCol
+          },
+          affectedColumns: (() => {
+            const cols = [];
+            for (let i = startColIndex; i <= endColIndex; i++) {
+              const col = visibleColumns[i];
+              cols.push({
+                index: i,
+                column: col ? { id: col.id, name: col.name, position: col.position } : 'OUT_OF_BOUNDS'
+              });
+            }
+            return cols;
+          })(),
+          visibleColumnsCount: visibleColumns.length
+        });
+        
+        // 🔧 FIXED: Use corrected array indices
+        if (startColIndex === -1 || endColIndex === -1) {
+          console.error('🔧 COLUMN POSITION ERROR: Could not find columns for positions:', { startColPos, endColPos });
+          return;
+        }
+        
+        // Collect data from selected range using corrected column indices
         for (let visualRow = actualStartRow; visualRow <= actualEndRow; visualRow++) {
           const rowData: Array<{ value: any; formula?: string }> = [];
           
@@ -1096,7 +1326,19 @@ export function EnhancedDataTable({
                 value: cell?.value || '',
                 formula: cell?.formula
               });
+              
+              // 🔍 DEBUG: Sample data for first row
+              if (visualRow === actualStartRow) {
+                console.log(`🔍 RANGE COPY ROW ${visualRow} COL ${colIndex}:`, {
+                  columnName: column.name,
+                  columnPosition: column.position,
+                  arrayIndex: colIndex,
+                  rowId,
+                  cellValue: cell?.value
+                });
+              }
             } else {
+              console.warn(`🔍 RANGE COPY WARNING: Column index ${colIndex} out of bounds!`);
               rowData.push({ value: '' });
             }
           }
@@ -1150,104 +1392,491 @@ export function EnhancedDataTable({
     console.log('✂️ Cut operation completed - data copied with cut flag');
   }, [handleCopy]);
 
-  const handlePaste = useCallback(async () => {
+  // ⚡ PERFORMANCE OPTIMIZED: Aggressive Chunking Strategy with larger sizes
+  const CHUNK_STRATEGY = useMemo(() => ({
+    tiny: { size: 100, parallel: 2, threshold: 0, delay: 5 },        // 0-200 cells (immediate)
+    small: { size: 300, parallel: 3, threshold: 200, delay: 10 },    // 200-800 cells
+    medium: { size: 500, parallel: 4, threshold: 800, delay: 15 },   // 800-2500 cells
+    large: { size: 750, parallel: 5, threshold: 2500, delay: 20 },   // 2500-7500 cells
+    huge: { size: 1000, parallel: 4, threshold: 7500, delay: 25 }    // >7500 cells
+  }), []);
+
+  // Enhanced strategy selection with more granular sizing
+  const getOptimalStrategy = useCallback((totalCells: number) => {
+    if (totalCells <= CHUNK_STRATEGY.small.threshold) return CHUNK_STRATEGY.tiny;
+    if (totalCells <= CHUNK_STRATEGY.medium.threshold) return CHUNK_STRATEGY.small;
+    if (totalCells <= CHUNK_STRATEGY.large.threshold) return CHUNK_STRATEGY.medium;
+    if (totalCells <= CHUNK_STRATEGY.huge.threshold) return CHUNK_STRATEGY.large;
+    return CHUNK_STRATEGY.huge;
+  }, [CHUNK_STRATEGY]);
+
+  // Create optimized chunks from paste data
+  const createOptimalChunks = useCallback((pasteData: string[][], strategy: any, startRowIndex: number, startColIndex: number) => {
+    const chunks: Array<{
+      cells: Array<{ rowId: number; columnId: number; value: any }>;
+      chunkId: string;
+    }> = [];
+    
+    let currentChunk: Array<{ rowId: number; columnId: number; value: any }> = [];
+    let chunkIndex = 0;
+
+    for (let rowOffset = 0; rowOffset < pasteData.length; rowOffset++) {
+      const targetRowIndex = startRowIndex + rowOffset;
+      if (targetRowIndex >= visibleRows.length) break;
+      
+      const targetRow = visibleRows[targetRowIndex];
+      const rowData = pasteData[rowOffset];
+      
+      for (let colOffset = 0; colOffset < rowData.length; colOffset++) {
+        const targetColIndex = startColIndex + colOffset;
+        if (targetColIndex >= visibleColumns.length) break;
+        
+        const targetColumn = visibleColumns[targetColIndex];
+        const value = rowData[colOffset];
+        
+        // Skip computed columns and empty values
+        if (targetColumn.isComputed || value === '') continue;
+        
+        currentChunk.push({
+          rowId: targetRow.id,
+          columnId: targetColumn.id,
+          value: value
+        });
+        
+        // Create new chunk when size limit reached
+        if (currentChunk.length >= strategy.size) {
+          chunks.push({
+            cells: [...currentChunk],
+            chunkId: `chunk_${chunkIndex++}_${Date.now()}`
+          });
+          currentChunk = [];
+        }
+      }
+    }
+    
+    // Add remaining cells as final chunk
+    if (currentChunk.length > 0) {
+      chunks.push({
+        cells: currentChunk,
+        chunkId: `chunk_${chunkIndex}_${Date.now()}`
+      });
+    }
+    
+    return chunks;
+  }, [visibleRows, visibleColumns]);
+
+  // ⚡ PERFORMANCE OPTIMIZED: Batched optimistic UI updates with reduced logging
+  const applyOptimisticUpdates = useCallback((chunks: any[]) => {
+    // Batch all cell updates into single Map operation for better performance
+    const allCellUpdates = new Map<string, any>();
+    
+    chunks.forEach(chunk => {
+      chunk.cells.forEach((cell: any) => {
+        const cellKey = `${cell.rowId}-${cell.columnId}`;
+        allCellUpdates.set(cellKey, cell.value);
+      });
+    });
+
+    setPendingValues(prev => {
+      const newMap = new Map(prev);
+      // Single batch update instead of nested loops
+      allCellUpdates.forEach((value, key) => {
+        newMap.set(key, value);
+      });
+      
+      // Reduced logging for performance
+      if (process.env.NODE_ENV === 'development') {
+        console.log('✨ Optimistic updates:', {
+          batchSize: allCellUpdates.size,
+          totalPending: newMap.size
+        });
+      }
+      return newMap;
+    });
+  }, []);
+
+  // ⚡ PERFORMANCE OPTIMIZED: Faster parallel processing with reduced logging
+  const processChunksInParallel = useCallback(async (chunks: any[], strategy: any) => {
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`🚀 Processing ${chunks.length} chunks (${strategy.parallel} parallel)`);
+    }
+    
+    const results: Array<{ success: boolean; errors: any[]; chunkId: string }> = [];
+    
+    // Process chunks in batches with optimized parallel execution
+    for (let i = 0; i < chunks.length; i += strategy.parallel) {
+      const batch = chunks.slice(i, i + strategy.parallel);
+      
+      const batchPromises = batch.map(async (chunk, index) => {
+        const isLastChunk = i + index === chunks.length - 1;
+        
+        try {
+          const response = await fetch(`/api/tables/${tableId}/cells/bulk`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              // Add auth token from cookies or localStorage
+              ...(typeof window !== 'undefined' && document.cookie.includes('auth-token') ? {
+                'Cookie': document.cookie
+              } : {}),
+            },
+            credentials: 'include', // Include cookies for authentication
+            body: JSON.stringify({
+              cells: chunk.cells,
+              options: {
+                chunkId: chunk.chunkId,
+                isLastChunk,
+                skipFormulaRecalc: !isLastChunk // Only recalc formulas on last chunk
+              }
+            }),
+          });
+          
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+          
+          const data = await response.json();
+          
+          // Reduced logging - only in development and for significant chunks
+          if (process.env.NODE_ENV === 'development' && chunk.cells.length > 50) {
+            console.log(`✅ Chunk processed: ${data.data?.updatedCount || 0} cells`);
+          }
+          
+          return {
+            success: data.data?.success || false,
+            errors: data.data?.errors || [],
+            chunkId: chunk.chunkId,
+            performance: data.data?.performance
+          };
+          
+        } catch (error) {
+          if (process.env.NODE_ENV === 'development') {
+            console.error(`❌ Chunk ${chunk.chunkId} failed:`, error);
+          }
+          return {
+            success: false,
+            errors: [{ error: error instanceof Error ? error.message : 'Unknown error' }],
+            chunkId: chunk.chunkId
+          };
+        }
+      });
+      
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      batchResults.forEach((result) => {
+        if (result.status === 'fulfilled') {
+          results.push(result.value);
+        } else {
+          results.push({
+            success: false,
+            errors: [{ error: result.reason }],
+            chunkId: 'unknown'
+          });
+        }
+      });
+      
+      // Reduced delay for faster processing
+      if (i + strategy.parallel < chunks.length && strategy.delay > 0) {
+        await new Promise(resolve => setTimeout(resolve, Math.max(5, strategy.delay)));
+      }
+    }
+    
+    return results;
+  }, [tableId]);
+
+  // Handle partial failures and cleanup
+  const handlePartialFailure = useCallback(async (results: any[]) => {
+    const failedChunks = results.filter(r => !r.success);
+    const successfulChunks = results.filter(r => r.success);
+    
+    console.warn(`⚠️ Partial failure: ${failedChunks.length}/${results.length} chunks failed`);
+    
+    // Clear optimistic updates for failed chunks only
+    const failedCellKeys = new Set<string>();
+    failedChunks.forEach(chunk => {
+      if (chunk.errors) {
+        chunk.errors.forEach((error: any) => {
+          if (error.rowId && error.columnId) {
+            failedCellKeys.add(`${error.rowId}-${error.columnId}`);
+          }
+        });
+      }
+    });
+    
+    if (failedCellKeys.size > 0) {
+      setPendingValues(prev => {
+        const newMap = new Map(prev);
+        failedCellKeys.forEach(key => newMap.delete(key));
+        return newMap;
+      });
+    }
+    
+    // Show error notification
+    console.error('❌ Paste errors:', failedChunks.flatMap(c => c.errors));
+    
+    return {
+      successful: successfulChunks.length,
+      failed: failedChunks.length,
+      errors: failedChunks.flatMap(c => c.errors)
+    };
+  }, []);
+
+  // 🔧 FIXED: Direct paste handler that bypasses API calls
+  const handlePasteFixed = useCallback(async () => {
+    console.log('🔧 PASTE FIXED: Starting direct paste operation', {
+      focusedCell,
+      copiedCells: !!copiedCells,
+      timestamp: Date.now()
+    });
+
     if (!focusedCell) {
-      console.log('🔄 No cell focused for paste');
+      console.log('❌ PASTE FIXED: No cell focused for paste');
       return;
     }
 
     try {
-      console.log('📋 Starting paste operation at:', focusedCell);
-      
-      // Try to get data from system clipboard first
       let pasteData: string[][] = [];
       
-      try {
-        const clipboardText = await navigator.clipboard.readText();
-        console.log('📄 Clipboard content:', clipboardText.substring(0, 100) + '...');
-        
-        // Parse tab-separated values
-        pasteData = clipboardText
-          .split('\n')
-          .filter(line => line.trim() !== '')
-          .map(line => line.split('\t'));
+      // 1. Try internal copied data first
+      if (copiedCells && copiedCells.data.length > 0) {
+        console.log('📋 PASTE FIXED: Using internal copied data');
+        pasteData = copiedCells.data.map(row =>
+          row.map(cell => cell.value?.toString() || '')
+        );
+      } else {
+        // 2. Fallback to clipboard
+        console.log('📋 PASTE FIXED: Trying clipboard');
+        try {
+          const clipboardText = await navigator.clipboard.readText();
+          console.log('✅ PASTE FIXED: Clipboard read successful:', clipboardText.substring(0, 50));
           
-      } catch (clipboardError) {
-        console.warn('⚠️ Clipboard read failed, using internal copy data:', clipboardError);
-        
-        // Fallback to internal copied data
-        if (copiedCells) {
-          pasteData = copiedCells.data.map(row => row.map(cell => cell.value?.toString() || ''));
-        } else {
-          console.log('❌ No data available to paste');
+          pasteData = clipboardText
+            .split('\n')
+            .filter(line => line.trim() !== '')
+            .map(line => line.split('\t'));
+        } catch (clipboardError) {
+          console.error('❌ PASTE FIXED: Clipboard access failed:', clipboardError);
           return;
         }
       }
       
       if (pasteData.length === 0) {
-        console.log('❌ No paste data available');
+        console.log('❌ PASTE FIXED: No data to paste');
         return;
       }
       
-      console.log('📊 Paste data dimensions:', `${pasteData.length}x${pasteData[0]?.length || 0}`);
+      console.log('📋 PASTE FIXED: Processing data:', {
+        rows: pasteData.length,
+        cols: pasteData[0]?.length || 0
+      });
       
-      // Find the starting position
+      // Find starting position
       const startRowIndex = visibleRows.findIndex(row => row.id === focusedCell.rowId);
       const startColumn = visibleColumns.find(col => col.id === focusedCell.columnId);
       
       if (startRowIndex === -1 || !startColumn) {
-        console.error('❌ Could not find start position for paste');
+        console.error('❌ PASTE FIXED: Invalid paste position');
         return;
       }
       
       const startColIndex = visibleColumns.indexOf(startColumn);
-      let updateCount = 0;
       
-      // Apply paste data
+      // 🔧 DIRECT CELL UPDATES: Use onCellUpdate directly instead of API calls
+      let updatedCells = 0;
+      
       for (let rowOffset = 0; rowOffset < pasteData.length; rowOffset++) {
         const targetRowIndex = startRowIndex + rowOffset;
-        
-        if (targetRowIndex >= visibleRows.length) {
-          console.warn('⚠️ Paste extends beyond available rows');
-          break;
-        }
+        if (targetRowIndex >= visibleRows.length) break;
         
         const targetRow = visibleRows[targetRowIndex];
         const rowData = pasteData[rowOffset];
         
         for (let colOffset = 0; colOffset < rowData.length; colOffset++) {
           const targetColIndex = startColIndex + colOffset;
-          
-          if (targetColIndex >= visibleColumns.length) {
-            console.warn('⚠️ Paste extends beyond available columns');
-            break;
-          }
+          if (targetColIndex >= visibleColumns.length) break;
           
           const targetColumn = visibleColumns[targetColIndex];
           const value = rowData[colOffset];
           
-          // Skip computed columns
-          if (targetColumn.isComputed) {
-            console.log('⏩ Skipping computed column:', targetColumn.name);
-            continue;
-          }
+          // Skip computed columns and empty values
+          if (targetColumn.isComputed || value === '') continue;
           
           try {
-            await onCellUpdate(targetRow.id, targetColumn.id, value);
-            updateCount++;
-            console.log(`✅ Updated cell [${targetRow.id}, ${targetColumn.id}] = "${value}"`);
-          } catch (updateError) {
-            console.error(`❌ Failed to update cell [${targetRow.id}, ${targetColumn.id}]:`, updateError);
+            console.log(`📋 PASTE FIXED: Updating cell ${targetRow.id}-${targetColumn.id} = "${value}"`);
+            // 🔧 OPTIMIZED: Use skipDelay for fast paste operations
+            await onCellUpdate(targetRow.id, targetColumn.id, value, undefined, { skipDelay: true });
+            updatedCells++;
+          } catch (error) {
+            console.error(`❌ PASTE FIXED: Failed to update cell ${targetRow.id}-${targetColumn.id}:`, error);
           }
         }
       }
       
-      console.log(`✅ Paste completed: ${updateCount} cells updated`);
+      console.log(`✅ PASTE FIXED COMPLETE: Updated ${updatedCells} cells`);
       
     } catch (error) {
-      console.error('❌ Paste failed:', error);
+      console.error('❌ PASTE FIXED: Failed:', error);
     }
-  }, [focusedCell, visibleRows, visibleColumns, copiedCells, onCellUpdate]);
+  }, [focusedCell, copiedCells, visibleRows, visibleColumns, onCellUpdate]);
+
+  // 🔧 ORIGINAL: Improved paste handler with better error handling
+  const handlePaste = useCallback(async () => {
+    const startTime = Date.now();
+    console.log('🔧 PASTE: Starting paste operation', {
+      focusedCell,
+      copiedCells: !!copiedCells,
+      timestamp: startTime
+    });
+
+    if (!focusedCell) {
+      console.log('❌ PASTE: No cell focused for paste');
+      return;
+    }
+
+    try {
+      // 🔧 PRIORITY: Use internal copiedCells first, then clipboard
+      let pasteData: string[][] = [];
+      
+      if (copiedCells && copiedCells.data.length > 0) {
+        // Use internal copied data (more reliable)
+        console.log('📋 PASTE: Using internal copied data', {
+          rows: copiedCells.data.length,
+          cols: copiedCells.data[0]?.length || 0
+        });
+        pasteData = copiedCells.data.map(row =>
+          row.map(cell => cell.value?.toString() || '')
+        );
+      } else {
+        // Fallback to clipboard
+        console.log('📋 PASTE: Attempting clipboard access...');
+        try {
+          const clipboardText = await navigator.clipboard.readText();
+          console.log('✅ PASTE: Clipboard read successful', {
+            length: clipboardText.length,
+            preview: clipboardText.substring(0, 50) + '...'
+          });
+          
+          pasteData = clipboardText
+            .split('\n')
+            .filter(line => line.trim() !== '')
+            .map(line => line.split('\t'));
+        } catch (clipboardError) {
+          console.error('❌ PASTE: Clipboard access failed:', clipboardError);
+          return;
+        }
+      }
+      
+      if (pasteData.length === 0) {
+        console.log('❌ PASTE: No data to paste');
+        return;
+      }
+      
+      const totalCells = pasteData.flat().length;
+      console.log('📋 PASTE: Processing data', {
+        rows: pasteData.length,
+        cols: pasteData[0]?.length || 0,
+        totalCells
+      });
+      
+      // Find starting position
+      const startRowIndex = visibleRows.findIndex(row => row.id === focusedCell.rowId);
+      const startColumn = visibleColumns.find(col => col.id === focusedCell.columnId);
+      
+      if (startRowIndex === -1 || !startColumn) {
+        console.error('❌ PASTE: Invalid paste position', {
+          startRowIndex,
+          startColumn: !!startColumn,
+          focusedCell
+        });
+        return;
+      }
+      
+      const startColIndex = visibleColumns.indexOf(startColumn);
+      
+      // 🔍 DEBUG: Paste position diagnostics
+      console.log('🔍 PASTE DIAGNOSTICS:', {
+        focusedCell,
+        startRowIndex,
+        startColumn: startColumn ? {
+          id: startColumn.id,
+          name: startColumn.name,
+          position: startColumn.position
+        } : 'NOT_FOUND',
+        startColIndex,
+        pasteDataSize: `${pasteData.length} rows x ${pasteData[0]?.length || 0} cols`,
+        targetRange: {
+          endRow: startRowIndex + pasteData.length - 1,
+          endCol: startColIndex + (pasteData[0]?.length || 0) - 1,
+          maxAvailableCol: visibleColumns.length - 1
+        },
+        willOverflow: startColIndex + (pasteData[0]?.length || 0) > visibleColumns.length
+      });
+      
+      // Determine optimal strategy and create chunks
+      const strategy = getOptimalStrategy(totalCells);
+      const chunks = createOptimalChunks(pasteData, strategy, startRowIndex, startColIndex);
+      
+      if (process.env.NODE_ENV === 'development') {
+        const strategyName = strategy === CHUNK_STRATEGY.tiny ? 'tiny' :
+          strategy === CHUNK_STRATEGY.small ? 'small' :
+          strategy === CHUNK_STRATEGY.medium ? 'medium' :
+          strategy === CHUNK_STRATEGY.large ? 'large' : 'huge';
+        
+        console.log(`🎯 ${strategyName}: ${totalCells} cells, ${chunks.length} chunks`);
+      }
+      
+      if (chunks.length === 0) return;
+      
+      // Apply optimistic UI updates immediately (batched for performance)
+      applyOptimisticUpdates(chunks);
+      
+      // Process chunks in parallel
+      const results = await processChunksInParallel(chunks, strategy);
+      
+      // Handle results
+      const hasErrors = results.some(r => !r.success);
+      
+      if (hasErrors) {
+        await handlePartialFailure(results);
+      } else {
+        // 🔧 FIXED: Better success handling and localStorage persistence
+          console.log('✅ PASTE: All chunks successful, clearing pending values');
+          setPendingValues(new Map());
+          
+          // 🔧 FORCE localStorage update for paste data
+          const tableKey = `table-${tableId}`;
+          const currentData = localStorage.getItem(tableKey);
+          if (currentData) {
+            try {
+              const parsed = JSON.parse(currentData);
+              console.log('💾 PASTE: Updating localStorage with paste data');
+              localStorage.setItem(tableKey, JSON.stringify(parsed));
+            } catch (e) {
+              console.error('❌ PASTE: localStorage update failed:', e);
+            }
+          }
+        }
+        
+        const endTime = Date.now();
+        const duration = endTime - startTime;
+        const cellsPerSecond = Math.round((totalCells / duration) * 1000);
+        
+        console.log(`✅ PASTE COMPLETE: ${duration}ms, ${cellsPerSecond} cells/sec`, {
+          hasErrors,
+          totalCells,
+          successfulResults: results.filter(r => r.success).length,
+          failedResults: results.filter(r => !r.success).length
+        });
+      
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Paste failed:', error);
+      }
+      setPendingValues(new Map());
+    }
+  }, [focusedCell, visibleRows, visibleColumns, copiedCells, tableId,
+      getOptimalStrategy, createOptimalChunks, applyOptimisticUpdates,
+      processChunksInParallel, handlePartialFailure, CHUNK_STRATEGY]);
 
 
   // Range insertion callback for FormulaBar
@@ -1807,7 +2436,7 @@ export function EnhancedDataTable({
     }
   }, [contextMenu, cellContextMenu, columnContextMenu]);
 
-  // Global keyboard event handlers for Copy & Paste
+  // 🔧 FIXED: Improved keyboard event handlers for Copy & Paste
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const tableContainer = document.querySelector('[data-table-container]');
@@ -1821,20 +2450,24 @@ export function EnhancedDataTable({
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
       const ctrlKey = isMac ? event.metaKey : event.ctrlKey;
 
-      console.log('⌨️ Key:', event.key, 'Ctrl:', ctrlKey, 'Focus:', !!focusedCell, 'Range:', !!selectedRange, 'Rows:', selectedRows.size);
+      console.log('⌨️ Key event:', {
+        key: event.key,
+        ctrlKey,
+        focusedCell: !!focusedCell,
+        selectedRange: !!selectedRange,
+        selectedRows: selectedRows.size
+      });
 
-      // More lenient focus check - handle copy/paste if we have any table interaction
+      // Only handle if table is focused
       if (!isTableFocused && !focusedCell && selectedRows.size === 0 && selectedColumns.size === 0) {
-        console.log('⌨️ Not handling - no interaction');
         return;
       }
 
-      // Copy (Ctrl+C / Cmd+C)
+      // 🔧 FIXED: Copy (Ctrl+C / Cmd+C) - Always try to copy something
       if (ctrlKey && event.key.toLowerCase() === 'c') {
-        console.log('📋 COPY shortcut detected!');
+        console.log('📋 COPY shortcut - checking what to copy');
         event.preventDefault();
         
-        // Priority: selected range > selected columns > focused cell > selected rows
         if (selectedRange) {
           console.log('📋 Copying selected range');
           handleCopy();
@@ -1843,59 +2476,61 @@ export function EnhancedDataTable({
           console.log('📋 Copying selected columns');
           handleCopy();
         }
-        else if (focusedCell) {
-          console.log('📋 Creating single-cell selection for focused cell');
-          const column = visibleColumns.find(col => col.id === focusedCell.columnId);
-          if (column) {
-            const singleCellRange = {
-              startRow: focusedCell.rowId,
-              endRow: focusedCell.rowId,
-              startCol: column.position,
-              endCol: column.position
-            };
-            console.log('📋 Single cell range created');
-            setSelectedRange(singleCellRange);
-            
-            // Copy after a brief delay to ensure state is updated
-            setTimeout(() => {
-              handleCopy();
-            }, 10);
-          }
-        }
         else if (selectedRows.size > 0) {
-          console.log('📋 Copying selected rows - creating range');
-          // Copy entire selected rows
-          const firstRowId = Array.from(selectedRows)[0];
-          const lastRowId = Array.from(selectedRows)[selectedRows.size - 1];
-          const firstCol = visibleColumns[0]?.position || 1;
-          const lastCol = visibleColumns[visibleColumns.length - 1]?.position || 1;
+          console.log('📋 Copying selected rows');
+          handleCopy();
+        }
+        else if (focusedCell) {
+          console.log('📋 FIXED: Copying single focused cell directly');
+          // 🔧 DIRECT single cell copy without range creation
+          const cell = getCellValue(focusedCell.rowId, focusedCell.columnId);
+          const cellData = [[{
+            value: cell?.value?.toString() || '',
+            formula: cell?.formula
+          }]];
           
-          const rowRange = {
-            startRow: Math.min(firstRowId, lastRowId),
-            endRow: Math.max(firstRowId, lastRowId),
-            startCol: firstCol,
-            endCol: lastCol
-          };
+          setCopiedCells({
+            data: cellData,
+            range: { startRow: 1, endRow: 1, startCol: 1, endCol: 1 },
+            isCut: false,
+            selectionType: 'range'
+          });
           
-          setSelectedRange(rowRange);
-          setTimeout(() => {
-            handleCopy();
-          }, 10);
+          // Copy to clipboard
+          try {
+            navigator.clipboard.writeText(cell?.value?.toString() || '');
+            console.log('✅ Single cell copied:', cell?.value);
+          } catch (error) {
+            console.error('❌ Clipboard copy failed:', error);
+          }
         }
         else {
           console.log('📋 Nothing to copy');
         }
       }
 
-      // Paste (Ctrl+V / Cmd+V)
+      // 🔧 FIXED: Paste (Ctrl+V / Cmd+V) - Use direct cell update
       else if (ctrlKey && event.key.toLowerCase() === 'v') {
         console.log('📋 PASTE shortcut detected!');
         event.preventDefault();
         if (focusedCell) {
-          console.log('📋 Pasting to focused cell');
-          handlePaste();
+          console.log('📋 FIXED: Pasting with direct cell update');
+          handlePasteFixed();
         } else {
           console.log('📋 No focused cell for paste');
+        }
+      }
+
+      // Undo (Ctrl+Z / Cmd+Z)
+      else if (ctrlKey && event.key.toLowerCase() === 'z') {
+        console.log('🔄 UNDO shortcut detected!');
+        event.preventDefault();
+        
+        if (undoHistory.length > 0) {
+          console.log('🔄 Executing undo');
+          performUndo();
+        } else {
+          console.log('🔄 No undo history available');
         }
       }
 
@@ -1904,47 +2539,32 @@ export function EnhancedDataTable({
         console.log('🗑️ DELETE shortcut detected!');
         event.preventDefault();
         
-        // Priority: selected range > focused cell > selected rows
         if (selectedRange) {
-          console.log('🗑️ Deleting content in selected range');
           handleDeleteRange();
         }
         else if (focusedCell) {
-          console.log('🗑️ Deleting content in focused cell');
           handleDeleteCell(focusedCell.rowId, focusedCell.columnId);
         }
         else if (selectedRows.size > 0) {
-          console.log('🗑️ Deleting content in selected rows');
           handleDeleteSelectedRows();
         }
         else if (selectedColumns.size > 0) {
-          console.log('🗑️ Deleting content in selected columns');
           handleDeleteSelectedColumns();
-        }
-        else {
-          console.log('🗑️ Nothing selected to delete');
         }
       }
 
       // Escape to clear selection
       else if (event.key === 'Escape') {
-        console.log('🔄 Escape - clearing all selections');
         setSelectedRange(null);
         setCopiedCells(null);
         setFocusedCell(null);
         setSelectedColumns(new Set());
-        setCellContextMenu(null);
-        setColumnContextMenu(null);
       }
     };
 
-    console.log('📋 Keyboard handlers registered');
     document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      console.log('📋 Keyboard handlers unregistered');
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [focusedCell, selectedRange, selectedRows.size, visibleColumns, handleCopy, handlePaste, handleDeleteRange, handleDeleteCell, handleDeleteSelectedRows]);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [focusedCell, selectedRange, selectedRows.size, visibleColumns, handleCopy, handleDeleteRange, handleDeleteCell, handleDeleteSelectedRows]);
 
   // Clear cell selection when clicking outside the table
   useEffect(() => {
@@ -2553,9 +3173,42 @@ export function EnhancedDataTable({
                       </TableHead>
                     ))}
                     
-                    {/* Column Management and Add Column Buttons */}
-                    <TableHead className="w-24 border-r border-gray-300 bg-gray-50">
+                    {/* Column Management, Add Column, and Undo Buttons */}
+                    <TableHead className="w-40 border-r border-gray-300 bg-gray-50">
                       <div className="flex items-center justify-center space-x-1">
+                        {/* UNDO BUTTON - Clean Production Version */}
+                        <button
+                          onClick={() => {
+                            console.log('🔄 UNDO BUTTON CLICKED!', {
+                              historyLength: undoHistory.length,
+                              canUndo
+                            });
+                            
+                            if (undoHistory.length > 0) {
+                              console.log('🔄 Performing undo operation');
+                              performUndo();
+                            } else {
+                              console.log('⚠️ No undo history available');
+                            }
+                          }}
+                          className={`h-8 w-8 p-0 border-2 rounded cursor-pointer flex items-center justify-center transition-colors ${
+                            canUndo
+                              ? 'text-white bg-blue-600 hover:bg-blue-700 border-blue-800'
+                              : 'text-white bg-gray-400 hover:bg-gray-500 border-gray-600 cursor-not-allowed'
+                          }`}
+                          title={canUndo ? "Rückgängig machen (Cmd+Z)" : "Keine Aktionen zum Rückgängig machen"}
+                          disabled={!canUndo}
+                        >
+                          <Undo2 className="h-4 w-4" />
+                        </button>
+                        
+                        {/* History Counter Badge */}
+                        {undoHistory.length > 0 && (
+                          <span className="text-xs text-blue-600 font-mono">
+                            {undoHistory.length}
+                          </span>
+                        )}
+                        
                         <Button
                           variant="ghost"
                           size="sm"
@@ -2584,9 +3237,9 @@ export function EnhancedDataTable({
                     const hiddenGroupAfterThis = hiddenRowGroups.find(group => group.afterRowId === row.id);
                     
                     return (
-                      <React.Fragment key={row.id}>
+                      <React.Fragment key={`row-fragment-${row.id}`}>
                     <TableRow
-                      key={row.id}
+                      key={`table-row-${row.id}`}
                       className={cn(
                         getRowClassName(row.id),
                         "border-b border-gray-200 transition-colors",
@@ -3043,7 +3696,7 @@ export function EnhancedDataTable({
                       
                       {/* Render hidden row group indicator after this row if needed */}
                       {hiddenGroupAfterThis && (
-                        <TableRow className="h-1 hover:h-6 transition-all duration-200 group">
+                        <TableRow key={`hidden-group-${hiddenGroupAfterThis.startId}-${hiddenGroupAfterThis.endId}`} className="h-1 hover:h-6 transition-all duration-200 group">
                           {/* Small indicator only in the ID column */}
                           <TableCell className="p-0 h-1 group-hover:h-6 transition-all duration-200 w-12 border-r border-gray-300">
                             <div
@@ -3066,9 +3719,9 @@ export function EnhancedDataTable({
                           
                           {/* Empty cells for other columns */}
                           {visibleColumns.map(col => (
-                            <TableCell key={col.id} className="p-0 h-1 group-hover:h-6 border-r border-gray-300"></TableCell>
+                            <TableCell key={`hidden-cell-${hiddenGroupAfterThis.startId}-${col.id}`} className="p-0 h-1 group-hover:h-6 border-r border-gray-300"></TableCell>
                           ))}
-                          <TableCell className="p-0 h-1 group-hover:h-6 w-24 border-r border-gray-300"></TableCell>
+                          <TableCell key={`hidden-cell-${hiddenGroupAfterThis.startId}-actions`} className="p-0 h-1 group-hover:h-6 w-24 border-r border-gray-300"></TableCell>
                         </TableRow>
                       )}
                     </React.Fragment>
